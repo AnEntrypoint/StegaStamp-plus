@@ -13,7 +13,6 @@ __pycache__/
 models/saved_models/
 models/detector_models/
 
-public/models/*.onnx
 
 .idea/
 .vscode/
