@@ -57,27 +57,29 @@ print("      ✓ Encoder built")
 print("      ✓ Decoder built")
 
 print("\n[2/4] Training encoder...")
-for epoch in range(5):
-    images = np.random.randn(16, 224, 224, 3).astype(np.float32) * 0.5 + 0.5
+for epoch in range(50):
+    images = np.random.randn(64, 224, 224, 3).astype(np.float32) * 0.5 + 0.5
     images = np.clip(images, 0, 1)
-    secrets = np.random.randint(0, 2, (16, 256)).astype(np.float32)
+    secrets = np.random.randint(0, 2, (64, 256)).astype(np.float32)
 
     encoded = encoder([images, secrets], training=True)
-    corrupted = encoded + np.random.randn(*encoded.shape).astype(np.float32) * 0.01
+    corrupted = encoded + np.random.randn(*encoded.shape).astype(np.float32) * 0.005
     loss = encoder.train_on_batch([images, secrets], corrupted)
-    print(f"      Epoch {epoch+1}/5 - Loss: {loss:.6f}")
+    if (epoch + 1) % 10 == 0:
+        print(f"      Epoch {epoch+1}/50 - Loss: {loss:.6f}")
 
 print("\n[3/4] Training decoder...")
-for epoch in range(5):
-    images = np.random.randn(16, 224, 224, 3).astype(np.float32) * 0.5 + 0.5
+for epoch in range(50):
+    images = np.random.randn(64, 224, 224, 3).astype(np.float32) * 0.5 + 0.5
     images = np.clip(images, 0, 1)
-    secrets = np.random.randint(0, 2, (16, 256)).astype(np.float32)
+    secrets = np.random.randint(0, 2, (64, 256)).astype(np.float32)
 
     encoded = encoder([images, secrets], training=True)
-    corrupted = encoded + np.random.randn(*encoded.shape).astype(np.float32) * 0.01
-    loss = decoder.train_on_batch(corrupted, [secrets, np.ones((16, 1))])
+    corrupted = encoded + np.random.randn(*encoded.shape).astype(np.float32) * 0.005
+    loss = decoder.train_on_batch(corrupted, [secrets, np.ones((64, 1))])
     loss_val = loss[0] if isinstance(loss, (list, tuple)) else loss
-    print(f"      Epoch {epoch+1}/5 - Loss: {loss_val:.6f}")
+    if (epoch + 1) % 10 == 0:
+        print(f"      Epoch {epoch+1}/50 - Loss: {loss_val:.6f}")
 
 print("\n[4/4] Converting to ONNX...")
 
