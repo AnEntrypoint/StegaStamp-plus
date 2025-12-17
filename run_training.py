@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import os
+import time
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -17,27 +18,17 @@ np.random.seed(42)
 tf.random.set_seed(42)
 
 SECRET_BITS = 256
-IMG_SIZE = 64
-PHASE1_EPOCHS = 20
-PHASE2_EPOCHS = 60
+IMG_SIZE = 128
+ENC_EPOCHS = 30
+DEC_EPOCHS = 40
 BATCH_SIZE = 32
-TRAIN_SAMPLES = 8000
+TRAIN_SAMPLES = 2000
 
-print("Generating synthetic training data with natural statistics...")
-def generate_natural_images(n_samples, size):
-    images = []
-    for _ in range(n_samples):
-        img = np.random.randn(size, size, 3) * 0.15 + 0.5
-        img = np.clip(img, 0, 1).astype(np.float32)
-        for _ in range(2):
-            img = tf.image.adjust_contrast(img, 1.2)
-        images.append(img)
-    return np.array(images, dtype=np.float32)
+print(f"Configuration: {TRAIN_SAMPLES} random images, {IMG_SIZE}x{IMG_SIZE}, separate training (enc:{ENC_EPOCHS} + dec:{DEC_EPOCHS} epochs)")
 
-train_images = generate_natural_images(TRAIN_SAMPLES, IMG_SIZE)
-test_images = generate_natural_images(1000, IMG_SIZE)
-
-print(f"Configuration: Synthetic natural images, {IMG_SIZE}x{IMG_SIZE}, {PHASE1_EPOCHS + PHASE2_EPOCHS} epochs, batch {BATCH_SIZE}")
+print("Generating training data...")
+train_images = np.random.rand(TRAIN_SAMPLES, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
+train_secrets = (np.random.rand(TRAIN_SAMPLES, SECRET_BITS) > 0.5).astype(np.float32)
 
 def build_encoder():
     image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
@@ -87,92 +78,33 @@ print("Building models...")
 encoder = build_encoder()
 decoder = build_decoder()
 
-print("Generating secrets...")
-train_secrets = (np.random.rand(TRAIN_SAMPLES, SECRET_BITS) > 0.5).astype(np.float32)
-
 print(f"Encoder params: {encoder.count_params():,}")
 print(f"Decoder params: {decoder.count_params():,}")
 
-enc_opt = keras.optimizers.Adam(learning_rate=0.0001)
-dec_opt = keras.optimizers.Adam(learning_rate=0.0001)
-
-def bit_loss_fn(decoded_bits, secret_bits):
-    return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-        labels=secret_bits,
-        logits=tf.math.log(tf.maximum(decoded_bits, 1e-7)) - tf.math.log(tf.maximum(1 - decoded_bits, 1e-7))
-    ))
-
-def combined_loss_fn(encoded, original, decoded_bits, secret_bits):
-    img_loss = tf.reduce_mean(tf.square(encoded - original))
-    secret_loss = bit_loss_fn(decoded_bits, secret_bits)
-    return 0.5 * img_loss + 1.0 * secret_loss
-
-import time
-total_epochs = PHASE1_EPOCHS + PHASE2_EPOCHS
 start_time = time.time()
 
-print(f"\n=== PHASE 1: Secret Loss Only ({PHASE1_EPOCHS} epochs) ===")
-for epoch in range(PHASE1_EPOCHS):
-    idx = np.random.permutation(len(train_images))
-    epoch_loss = 0
-    num_batches = 0
-    epoch_start = time.time()
+print(f"\n=== PHASE 1: Train Encoder ({ENC_EPOCHS} epochs) ===")
+encoder.compile(optimizer=keras.optimizers.Adam(0.0001), loss='mse')
+encoder.fit(train_images, train_images, epochs=ENC_EPOCHS, batch_size=BATCH_SIZE, verbose=0)
 
+print(f"=== PHASE 2: Train Decoder ({DEC_EPOCHS} epochs) ===")
+decoder.compile(optimizer=keras.optimizers.Adam(0.0001), loss='binary_crossentropy')
+for dec_epoch in range(DEC_EPOCHS):
+    epoch_start = time.time()
+    idx = np.random.permutation(len(train_images))
     for i in range(0, len(idx), BATCH_SIZE):
         batch_idx = idx[i:i+BATCH_SIZE]
         batch_imgs = train_images[batch_idx]
         batch_secs = train_secrets[batch_idx]
-
-        with tf.GradientTape(persistent=True) as tape:
-            encoded = encoder([batch_imgs, batch_secs], training=True)
-            decoded_bits = decoder(encoded, training=True)
-            loss = bit_loss_fn(decoded_bits, batch_secs)
-
-        grads_enc = tape.gradient(loss, encoder.trainable_variables)
-        grads_dec = tape.gradient(loss, decoder.trainable_variables)
-
-        enc_opt.apply_gradients(zip(grads_enc, encoder.trainable_variables))
-        dec_opt.apply_gradients(zip(grads_dec, decoder.trainable_variables))
-        del tape
-
-        epoch_loss += float(loss)
-        num_batches += 1
-
+        encoded = encoder([batch_imgs, batch_secs], training=False)
+        decoder.train_on_batch(encoded, batch_secs)
     epoch_time = time.time() - epoch_start
-    print(f"Epoch {epoch+1}/{total_epochs} - SecretLoss: {epoch_loss/num_batches:.6f} - {epoch_time:.1f}s")
-
-print(f"\n=== PHASE 2: Combined Loss ({PHASE2_EPOCHS} epochs) ===")
-for epoch in range(PHASE2_EPOCHS):
-    idx = np.random.permutation(len(train_images))
-    epoch_loss = 0
-    num_batches = 0
-    epoch_start = time.time()
-
-    for i in range(0, len(idx), BATCH_SIZE):
-        batch_idx = idx[i:i+BATCH_SIZE]
-        batch_imgs = train_images[batch_idx]
-        batch_secs = train_secrets[batch_idx]
-
-        with tf.GradientTape(persistent=True) as tape:
-            encoded = encoder([batch_imgs, batch_secs], training=True)
-            decoded_bits = decoder(encoded, training=True)
-            loss = combined_loss_fn(encoded, batch_imgs, decoded_bits, batch_secs)
-
-        grads_enc = tape.gradient(loss, encoder.trainable_variables)
-        grads_dec = tape.gradient(loss, decoder.trainable_variables)
-
-        enc_opt.apply_gradients(zip(grads_enc, encoder.trainable_variables))
-        dec_opt.apply_gradients(zip(grads_dec, decoder.trainable_variables))
-        del tape
-
-        epoch_loss += float(loss)
-        num_batches += 1
-
-    epoch_time = time.time() - epoch_start
-    print(f"Epoch {epoch+PHASE1_EPOCHS+1}/{total_epochs} - Combined: {epoch_loss/num_batches:.6f} - {epoch_time:.1f}s")
+    if (dec_epoch + 1) % 5 == 0:
+        print(f"Decoder Epoch {dec_epoch+1}/{DEC_EPOCHS} - {epoch_time:.1f}s")
 
 print("\nTesting on validation set...")
-test_secrets = (np.random.rand(len(test_images), SECRET_BITS) > 0.5).astype(np.float32)
+test_images = np.random.rand(500, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
+test_secrets = (np.random.rand(500, SECRET_BITS) > 0.5).astype(np.float32)
 
 test_encoded = encoder.predict([test_images, test_secrets], verbose=0)
 pred_bits = decoder.predict(test_encoded, verbose=0)
