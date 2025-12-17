@@ -2,8 +2,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import os
-from io import BytesIO
-from PIL import Image
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -19,39 +17,27 @@ np.random.seed(42)
 tf.random.set_seed(42)
 
 SECRET_BITS = 256
-IMG_SIZE = 128
-PHASE1_EPOCHS = 15
-PHASE2_EPOCHS = 50
-BATCH_SIZE = 16
-USE_CIFAR10 = True
+IMG_SIZE = 64
+PHASE1_EPOCHS = 20
+PHASE2_EPOCHS = 60
+BATCH_SIZE = 32
+TRAIN_SAMPLES = 8000
 
-print("Loading CIFAR-10 dataset...")
-(x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
-x_train = x_train.astype(np.float32) / 255.0
-x_test = x_test.astype(np.float32) / 255.0
+print("Generating synthetic training data with natural statistics...")
+def generate_natural_images(n_samples, size):
+    images = []
+    for _ in range(n_samples):
+        img = np.random.randn(size, size, 3) * 0.15 + 0.5
+        img = np.clip(img, 0, 1).astype(np.float32)
+        for _ in range(2):
+            img = tf.image.adjust_contrast(img, 1.2)
+        images.append(img)
+    return np.array(images, dtype=np.float32)
 
-def resize_batch(images):
-    resized = []
-    for img in images:
-        pil_img = Image.fromarray((img * 255).astype(np.uint8))
-        pil_img = pil_img.resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
-        resized.append(np.array(pil_img) / 255.0)
-    return np.array(resized, dtype=np.float32)
+train_images = generate_natural_images(TRAIN_SAMPLES, IMG_SIZE)
+test_images = generate_natural_images(1000, IMG_SIZE)
 
-def augment_image(img):
-    aug = img.copy()
-    if np.random.rand() > 0.5:
-        aug = tf.image.random_flip_left_right(aug)
-    if np.random.rand() > 0.5:
-        aug = tf.image.adjust_brightness(aug, 0.1)
-    if np.random.rand() > 0.7:
-        aug = tf.image.adjust_contrast(aug, 0.8)
-    return aug
-
-x_train_resized = resize_batch(x_train[:5000])
-x_test_resized = resize_batch(x_test[:1000])
-
-print(f"Configuration: CIFAR-10 real images, {PHASE1_EPOCHS + PHASE2_EPOCHS} total epochs, batch size {BATCH_SIZE}")
+print(f"Configuration: Synthetic natural images, {IMG_SIZE}x{IMG_SIZE}, {PHASE1_EPOCHS + PHASE2_EPOCHS} epochs, batch {BATCH_SIZE}")
 
 def build_encoder():
     image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
@@ -101,9 +87,8 @@ print("Building models...")
 encoder = build_encoder()
 decoder = build_decoder()
 
-print("Preparing training data...")
-train_images = x_train_resized
-train_secrets = (np.random.rand(len(train_images), SECRET_BITS) > 0.5).astype(np.float32)
+print("Generating secrets...")
+train_secrets = (np.random.rand(TRAIN_SAMPLES, SECRET_BITS) > 0.5).astype(np.float32)
 
 print(f"Encoder params: {encoder.count_params():,}")
 print(f"Decoder params: {decoder.count_params():,}")
@@ -187,7 +172,6 @@ for epoch in range(PHASE2_EPOCHS):
     print(f"Epoch {epoch+PHASE1_EPOCHS+1}/{total_epochs} - Combined: {epoch_loss/num_batches:.6f} - {epoch_time:.1f}s")
 
 print("\nTesting on validation set...")
-test_images = x_test_resized
 test_secrets = (np.random.rand(len(test_images), SECRET_BITS) > 0.5).astype(np.float32)
 
 test_encoded = encoder.predict([test_images, test_secrets], verbose=0)
