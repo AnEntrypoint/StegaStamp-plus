@@ -18,10 +18,10 @@ tf.random.set_seed(42)
 
 SECRET_BITS = 256
 IMG_SIZE = 128
-PHASE1_EPOCHS = 30
-PHASE2_EPOCHS = 120
-BATCH_SIZE = 16
-TRAIN_SAMPLES = 2000
+PHASE1_EPOCHS = 25
+PHASE2_EPOCHS = 100
+BATCH_SIZE = 32
+TRAIN_SAMPLES = 1000
 
 print(f"Configuration: {TRAIN_SAMPLES} training samples, {PHASE1_EPOCHS + PHASE2_EPOCHS} total epochs")
 
@@ -29,22 +29,19 @@ def build_encoder():
     image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
     secret_in = keras.Input(shape=(SECRET_BITS,), name='secret')
 
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(image_in)
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(image_in)
+    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(x)
 
-    secret_expanded = keras.layers.Dense(1024, activation='relu')(secret_in)
-    secret_expanded = keras.layers.Dense(2048, activation='relu')(secret_expanded)
-    secret_expanded = keras.layers.Reshape((16, 16, 8))(secret_expanded)
+    secret_expanded = keras.layers.Dense(512, activation='relu')(secret_in)
+    secret_expanded = keras.layers.Dense(1024, activation='relu')(secret_expanded)
+    secret_expanded = keras.layers.Reshape((16, 16, 4))(secret_expanded)
     secret_expanded = keras.layers.UpSampling2D(size=(8, 8))(secret_expanded)
-    secret_expanded = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(secret_expanded)
-    secret_expanded = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(secret_expanded)
+    secret_expanded = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(secret_expanded)
     secret_expanded = keras.layers.Lambda(lambda x: x * 0.001)(secret_expanded)
 
     combined = keras.layers.Concatenate()([x, secret_expanded])
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(combined)
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)
-    x = keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(combined)
+    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(x)
     out = keras.layers.Conv2D(3, 3, padding='same', activation='sigmoid')(x)
 
     return keras.Model(inputs=[image_in, secret_in], outputs=out)
@@ -52,23 +49,20 @@ def build_encoder():
 def build_decoder():
     image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
 
-    x = keras.layers.Conv2D(128, 3, padding='same', activation='relu')(image_in)
-    x = keras.layers.Conv2D(128, 3, padding='same', activation='relu')(x)
+    x = keras.layers.Conv2D(96, 3, padding='same', activation='relu')(image_in)
+    x = keras.layers.Conv2D(96, 3, padding='same', activation='relu')(x)
+    x = keras.layers.MaxPooling2D(2)(x)
+
+    x = keras.layers.Conv2D(192, 3, padding='same', activation='relu')(x)
+    x = keras.layers.Conv2D(192, 3, padding='same', activation='relu')(x)
     x = keras.layers.MaxPooling2D(2)(x)
 
     x = keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)
-    x = keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)
-    x = keras.layers.MaxPooling2D(2)(x)
-
-    x = keras.layers.Conv2D(512, 3, padding='same', activation='relu')(x)
-    x = keras.layers.Conv2D(512, 3, padding='same', activation='relu')(x)
     x = keras.layers.MaxPooling2D(2)(x)
 
     x = keras.layers.Flatten()(x)
-    x = keras.layers.Dense(2048, activation='relu')(x)
-    x = keras.layers.Dropout(0.5)(x)
     x = keras.layers.Dense(1024, activation='relu')(x)
-    x = keras.layers.Dropout(0.3)(x)
+    x = keras.layers.Dropout(0.5)(x)
     x = keras.layers.Dense(512, activation='relu')(x)
 
     bits_out = keras.layers.Dense(SECRET_BITS, activation='sigmoid', name='bits')(x)
