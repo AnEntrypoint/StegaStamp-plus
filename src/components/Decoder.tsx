@@ -45,9 +45,7 @@ export function Decoder({ useWebGPU = false }: { useWebGPU?: boolean }) {
       const { data: imageTensor, dims } = imageToTensor(image, DECODER_WIDTH, DECODER_HEIGHT);
       const result = await model.decode(imageTensor, dims);
 
-      const corrected = result.bits;
-
-      const bits = bytesToBits(corrected);
+      const bits = Array.from(result.bits).map(b => b === 1);
       let secret = '';
       try {
         secret = bitsToString(bits.slice(0, SECRET_BITS)).split('\0')[0];
