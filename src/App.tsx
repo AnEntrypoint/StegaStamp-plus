@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Encoder } from './components/Encoder';
 import { Decoder } from './components/Decoder';
 import './styles.css';
