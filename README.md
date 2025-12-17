@@ -213,13 +213,24 @@ localhost:8080/detecdecode.html
 
 ## Getting Started Yourself
 
-The project is still a work in progress, but I want to put it out so that I get some good suggestions.
+### Option 1: Browser-Based (WebGPU)
+The easiest way to encode/decode is using the browser interface:
 
-The easiest way to get started is to simply try out on Colab: 
+```bash
+npm install
+bash scripts/download-models.sh
+python3 scripts/convert-models.py
+npm run dev
+```
 
-[<img src="https://colab.research.google.com/assets/colab-badge.svg" align="center">](https://colab.research.google.com/github/Charmve/StegaStamp/blob/master/StegaStamp_train_model.ipynb)  
+Visit `http://localhost:5173` and use the web interface. See [SETUP.md](SETUP.md) for details.
 
-The secret.len is limited 7 characters (56 bit).
+### Option 2: Google Colab
+Try the training notebook on Colab:
+
+[<img src="https://colab.research.google.com/assets/colab-badge.svg" align="center">](https://colab.research.google.com/github/Charmve/StegaStamp/blob/master/StegaStamp_train_model.ipynb)
+
+The secret is limited to 7 characters (56 bits effective with 44 bits error correction).
 
 ## Disclaimer
 

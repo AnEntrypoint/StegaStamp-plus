@@ -1,0 +1,33 @@
+{
+  "name": "stegastamp-plus",
+  "version": "1.0.0",
+  "description": "Invisible Hyperlinks in Physical Photographs - WebGPU Browser Implementation",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "steganography",
+    "stegastamp",
+    "webgpu"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.23.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
