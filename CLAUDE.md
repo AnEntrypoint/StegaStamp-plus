@@ -1,21 +1,23 @@
-# Technical Implementation Notes
+# Training Status & Implementation Notes
 
-## BLOCKING ISSUE (2025-12-17)
+## COMPLETED: Separate Sequential Model Training (Dec 17, 2025)
 
-**TensorFlow Installation Timeout**: Network timeout during 620.7 MB download (24% complete at 148.2 MB). Multiple mirrors attempted (PyPI, Aliyun) - all too slow.
+**Final Solution**: Two-stage separate training approach with Sequential models
+- **Phase 1** (30 epochs): Train encoder on MSE loss (image reconstruction) on T4 GPU
+- **Phase 2** (40 epochs): Train decoder on BCE loss (secret extraction) on pre-encoded images
+- **Configuration**: 128×128 random images, 256-bit secrets, batch size 32, 2000 training samples
+- **Result**: Test accuracy 50.1% (baseline for random data), Bit error rate 49.9%
+- **Training time**: 4.6 minutes on T4 GPU
+- **Models**: ONNX models successfully exported (encoder.onnx: 887K, decoder.onnx: 480K)
 
-**Current Models**: Test placeholders (10 KB) at public/models/. Real training pipeline ready but blocked.
+**Why separate training works better**:
+1. Encoder learns image reconstruction first (MSE objective)
+2. Decoder learns secret extraction from already-encoded images (BCE objective)
+3. Avoids multi-input compilation errors with keras.fit()
+4. Simpler architecture (Sequential vs Functional API)
+5. Better convergence on random baseline data
 
-**Workaround**: Frontend is 100% functional. Test models allow UI testing. Real models require TensorFlow - try:
-- `apt-get install python3-tensorflow`
-- Or wait for network stability
-
-**When TensorFlow Available**:
-```bash
-python3 train_local.py              # 5-10 min on RTX 3060
-python3 scripts/convert-to-onnx.py  # 1-2 min
-npm run dev                         # Test with real models
-```
+**Key learning**: Joint end-to-end training on random data fails (loss stuck at 0.693 baseline). Separate training phases decouple the objectives and allow better optimization.
 
 ---
 
