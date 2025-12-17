@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { loadImage, imageToTensor, tensorToImage, stringToBits, padBits, canvasToBlob } from '../utils/imageProcessing';
 import { useStegaStamp } from '../hooks/useStegaStamp';
 
