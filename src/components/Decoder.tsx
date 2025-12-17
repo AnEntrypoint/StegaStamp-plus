@@ -45,10 +45,16 @@ export function Decoder({ useWebGPU = false }: { useWebGPU?: boolean }) {
       const { data: imageTensor, dims } = imageToTensor(image, DECODER_WIDTH, DECODER_HEIGHT);
       const result = await model.decode(imageTensor, dims);
 
-      const bits = Array.from(result.bits).map(b => b === 1);
+      const bits = Array.from(result.bits).map(b => b === 1).slice(0, SECRET_BITS);
       let secret = '';
       try {
-        secret = bitsToString(bits.slice(0, SECRET_BITS)).split('\0')[0];
+        const bytes = new Uint8Array(Math.ceil(bits.length / 8));
+        for (let i = 0; i < bits.length; i++) {
+          if (bits[i]) {
+            bytes[Math.floor(i / 8)] |= 1 << (7 - (i % 8));
+          }
+        }
+        secret = new TextDecoder().decode(bytes).split('\0')[0];
       } catch {
         secret = '(unable to decode)';
       }
