@@ -2,6 +2,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import os
+from io import BytesIO
+from PIL import Image
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -18,12 +20,38 @@ tf.random.set_seed(42)
 
 SECRET_BITS = 256
 IMG_SIZE = 128
-PHASE1_EPOCHS = 25
-PHASE2_EPOCHS = 100
-BATCH_SIZE = 32
-TRAIN_SAMPLES = 1000
+PHASE1_EPOCHS = 15
+PHASE2_EPOCHS = 50
+BATCH_SIZE = 16
+USE_CIFAR10 = True
 
-print(f"Configuration: {TRAIN_SAMPLES} training samples, {PHASE1_EPOCHS + PHASE2_EPOCHS} total epochs")
+print("Loading CIFAR-10 dataset...")
+(x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
+x_train = x_train.astype(np.float32) / 255.0
+x_test = x_test.astype(np.float32) / 255.0
+
+def resize_batch(images):
+    resized = []
+    for img in images:
+        pil_img = Image.fromarray((img * 255).astype(np.uint8))
+        pil_img = pil_img.resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+        resized.append(np.array(pil_img) / 255.0)
+    return np.array(resized, dtype=np.float32)
+
+def augment_image(img):
+    aug = img.copy()
+    if np.random.rand() > 0.5:
+        aug = tf.image.random_flip_left_right(aug)
+    if np.random.rand() > 0.5:
+        aug = tf.image.adjust_brightness(aug, 0.1)
+    if np.random.rand() > 0.7:
+        aug = tf.image.adjust_contrast(aug, 0.8)
+    return aug
+
+x_train_resized = resize_batch(x_train[:5000])
+x_test_resized = resize_batch(x_test[:1000])
+
+print(f"Configuration: CIFAR-10 real images, {PHASE1_EPOCHS + PHASE2_EPOCHS} total epochs, batch size {BATCH_SIZE}")
 
 def build_encoder():
     image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
@@ -73,9 +101,9 @@ print("Building models...")
 encoder = build_encoder()
 decoder = build_decoder()
 
-print("Generating training data...")
-train_images = np.random.rand(TRAIN_SAMPLES, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
-train_secrets = (np.random.rand(TRAIN_SAMPLES, SECRET_BITS) > 0.5).astype(np.float32)
+print("Preparing training data...")
+train_images = x_train_resized
+train_secrets = (np.random.rand(len(train_images), SECRET_BITS) > 0.5).astype(np.float32)
 
 print(f"Encoder params: {encoder.count_params():,}")
 print(f"Decoder params: {decoder.count_params():,}")
@@ -159,8 +187,8 @@ for epoch in range(PHASE2_EPOCHS):
     print(f"Epoch {epoch+PHASE1_EPOCHS+1}/{total_epochs} - Combined: {epoch_loss/num_batches:.6f} - {epoch_time:.1f}s")
 
 print("\nTesting on validation set...")
-test_images = np.random.rand(100, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
-test_secrets = (np.random.rand(100, SECRET_BITS) > 0.5).astype(np.float32)
+test_images = x_test_resized
+test_secrets = (np.random.rand(len(test_images), SECRET_BITS) > 0.5).astype(np.float32)
 
 test_encoded = encoder.predict([test_images, test_secrets], verbose=0)
 pred_bits = decoder.predict(test_encoded, verbose=0)
