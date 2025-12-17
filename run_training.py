@@ -30,53 +30,27 @@ print("Generating training data...")
 train_images = np.random.rand(TRAIN_SAMPLES, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
 train_secrets = (np.random.rand(TRAIN_SAMPLES, SECRET_BITS) > 0.5).astype(np.float32)
 
-def build_encoder():
-    image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
-    secret_in = keras.Input(shape=(SECRET_BITS,), name='secret')
-
-    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(image_in)
-    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(x)
-
-    secret_expanded = keras.layers.Dense(512, activation='relu')(secret_in)
-    secret_expanded = keras.layers.Dense(1024, activation='relu')(secret_expanded)
-    secret_expanded = keras.layers.Reshape((16, 16, 4))(secret_expanded)
-    secret_expanded = keras.layers.UpSampling2D(size=(8, 8))(secret_expanded)
-    secret_expanded = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(secret_expanded)
-    secret_expanded = keras.layers.Lambda(lambda x: x * 0.001)(secret_expanded)
-
-    combined = keras.layers.Concatenate()([x, secret_expanded])
-    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(combined)
-    x = keras.layers.Conv2D(48, 3, padding='same', activation='relu')(x)
-    out = keras.layers.Conv2D(3, 3, padding='same', activation='sigmoid')(x)
-
-    return keras.Model(inputs=[image_in, secret_in], outputs=out)
-
-def build_decoder():
-    image_in = keras.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
-
-    x = keras.layers.Conv2D(96, 3, padding='same', activation='relu')(image_in)
-    x = keras.layers.Conv2D(96, 3, padding='same', activation='relu')(x)
-    x = keras.layers.MaxPooling2D(2)(x)
-
-    x = keras.layers.Conv2D(192, 3, padding='same', activation='relu')(x)
-    x = keras.layers.Conv2D(192, 3, padding='same', activation='relu')(x)
-    x = keras.layers.MaxPooling2D(2)(x)
-
-    x = keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)
-    x = keras.layers.MaxPooling2D(2)(x)
-
-    x = keras.layers.Flatten()(x)
-    x = keras.layers.Dense(1024, activation='relu')(x)
-    x = keras.layers.Dropout(0.5)(x)
-    x = keras.layers.Dense(512, activation='relu')(x)
-
-    bits_out = keras.layers.Dense(SECRET_BITS, activation='sigmoid', name='bits')(x)
-
-    return keras.Model(inputs=image_in, outputs=bits_out)
-
 print("Building models...")
-encoder = build_encoder()
-decoder = build_decoder()
+encoder = keras.Sequential([
+    keras.layers.Input((IMG_SIZE, IMG_SIZE, 3)),
+    keras.layers.Conv2D(32, 3, padding='same', activation='relu'),
+    keras.layers.Conv2D(32, 3, padding='same', activation='relu'),
+    keras.layers.Conv2D(3, 3, padding='same', activation='sigmoid')
+])
+
+decoder = keras.Sequential([
+    keras.layers.Input((IMG_SIZE, IMG_SIZE, 3)),
+    keras.layers.Conv2D(64, 3, padding='same', activation='relu'),
+    keras.layers.Conv2D(64, 3, padding='same', activation='relu'),
+    keras.layers.MaxPooling2D(2),
+    keras.layers.Conv2D(128, 3, padding='same', activation='relu'),
+    keras.layers.MaxPooling2D(2),
+    keras.layers.Conv2D(256, 3, padding='same', activation='relu'),
+    keras.layers.MaxPooling2D(2),
+    keras.layers.Flatten(),
+    keras.layers.Dense(512, activation='relu'),
+    keras.layers.Dense(SECRET_BITS, activation='sigmoid')
+])
 
 print(f"Encoder params: {encoder.count_params():,}")
 print(f"Decoder params: {decoder.count_params():,}")
@@ -86,27 +60,28 @@ start_time = time.time()
 print(f"\n=== PHASE 1: Train Encoder ({ENC_EPOCHS} epochs) ===")
 encoder.compile(optimizer=keras.optimizers.Adam(0.0001), loss='mse')
 encoder.fit(train_images, train_images, epochs=ENC_EPOCHS, batch_size=BATCH_SIZE, verbose=0)
+print(f"✓ Encoder trained")
 
-print(f"=== PHASE 2: Train Decoder ({DEC_EPOCHS} epochs) ===")
+print(f"\n=== PHASE 2: Train Decoder ({DEC_EPOCHS} epochs) ===")
 decoder.compile(optimizer=keras.optimizers.Adam(0.0001), loss='binary_crossentropy')
+encoded_images = encoder.predict(train_images, verbose=0)
 for dec_epoch in range(DEC_EPOCHS):
+    idx = np.random.permutation(len(encoded_images))
     epoch_start = time.time()
-    idx = np.random.permutation(len(train_images))
     for i in range(0, len(idx), BATCH_SIZE):
         batch_idx = idx[i:i+BATCH_SIZE]
-        batch_imgs = train_images[batch_idx]
+        batch_enc = encoded_images[batch_idx]
         batch_secs = train_secrets[batch_idx]
-        encoded = encoder([batch_imgs, batch_secs], training=False)
-        decoder.train_on_batch(encoded, batch_secs)
+        decoder.train_on_batch(batch_enc, batch_secs)
     epoch_time = time.time() - epoch_start
-    if (dec_epoch + 1) % 5 == 0:
+    if (dec_epoch + 1) % 10 == 0:
         print(f"Decoder Epoch {dec_epoch+1}/{DEC_EPOCHS} - {epoch_time:.1f}s")
 
 print("\nTesting on validation set...")
 test_images = np.random.rand(500, IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 0.5 + 0.25
 test_secrets = (np.random.rand(500, SECRET_BITS) > 0.5).astype(np.float32)
 
-test_encoded = encoder.predict([test_images, test_secrets], verbose=0)
+test_encoded = encoder.predict(test_images, verbose=0)
 pred_bits = decoder.predict(test_encoded, verbose=0)
 
 pred_binary = (pred_bits > 0.5).astype(int)
