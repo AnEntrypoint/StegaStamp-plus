@@ -24,7 +24,7 @@ TRAIN_PATH = '/home/user/StegaStamp-plus/data/train'
 HEIGHT, WIDTH = 256, 256
 SECRET_SIZE = 256
 BATCH_SIZE = 2
-NUM_STEPS = 20000
+NUM_STEPS = 140000
 LEARNING_RATE = 0.0001
 
 print(f"Loading images from {TRAIN_PATH}...", flush=True)
@@ -47,9 +47,12 @@ def get_img_batch(batch_size=BATCH_SIZE, step=0):
     indices = np.random.choice(len(cached_images), batch_size, replace=True)
     images = cached_images[indices]
 
-    if step < 5000:
+    const_end = int(NUM_STEPS * 0.25)
+    grad_end = int(NUM_STEPS * 0.50)
+
+    if step < const_end:
         secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * 0.7
-    elif step < 10000:
+    elif step < grad_end:
         secrets = (np.random.rand(batch_size, SECRET_SIZE) * 0.2 + 0.6).astype(np.float32)
     else:
         secrets = (np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE))).astype(np.float32)
@@ -177,7 +180,9 @@ for step in range(NUM_STEPS):
 
     if (step + 1) % 500 == 0:
         elapsed = (time.time() - start_time) / 60
-        phase = "const" if step < 5000 else ("grad" if step < 10000 else "random")
+        const_end = int(NUM_STEPS * 0.25)
+        grad_end = int(NUM_STEPS * 0.50)
+        phase = "const" if step < const_end else ("grad" if step < grad_end else "random")
         print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] Msg:{float(msg_loss):.4f} Res:{float(res_loss):.4f} Total:{float(tot_loss):.4f} ({elapsed:.1f}m)", flush=True)
 
 print("\nTesting...", flush=True)
