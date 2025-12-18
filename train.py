@@ -24,8 +24,8 @@ TRAIN_PATH = '/home/user/StegaStamp-plus/data/train'
 HEIGHT, WIDTH = 256, 256
 SECRET_SIZE = 256
 BATCH_SIZE = 2
-NUM_STEPS = 5000
-LEARNING_RATE = 0.001
+NUM_STEPS = 20000
+LEARNING_RATE = 0.0001
 
 print(f"Loading images from {TRAIN_PATH}...", flush=True)
 img_files = (glob.glob(os.path.join(TRAIN_PATH, '*.jpg')) +
@@ -47,9 +47,9 @@ def get_img_batch(batch_size=BATCH_SIZE, step=0):
     indices = np.random.choice(len(cached_images), batch_size, replace=True)
     images = cached_images[indices]
 
-    if step < 1250:
+    if step < 5000:
         secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * 0.7
-    elif step < 2500:
+    elif step < 10000:
         secrets = (np.random.rand(batch_size, SECRET_SIZE) * 0.2 + 0.6).astype(np.float32)
     else:
         secrets = (np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE))).astype(np.float32)
@@ -131,38 +131,54 @@ class Decoder(keras.Model):
         x = self.dense1(x)
         return self.dense2(x)
 
-print(f"Building U-Net models (secret_size={SECRET_SIZE}, img={HEIGHT}x{WIDTH})...", flush=True)
+print(f"Building paper-based models with multi-loss...", flush=True)
 encoder = Encoder()
 decoder = Decoder()
 
 enc_opt = keras.optimizers.Adam(LEARNING_RATE)
 dec_opt = keras.optimizers.Adam(LEARNING_RATE)
 
-def train_step(images, secrets):
+def loss_schedule(step):
+    total_steps = NUM_STEPS
+    if step < total_steps * 0.15:
+        return 0.0
+    elif step < total_steps * 0.5:
+        r_weight = (step - total_steps * 0.15) / (total_steps * 0.35)
+        return r_weight
+    else:
+        return 1.0
+
+def train_step(images, secrets, step):
+    lambda_r = loss_schedule(step)
+
     with tf.GradientTape(persistent=True) as tape:
         encoded = encoder([images, secrets], training=True)
         decoded = decoder(encoded, training=True)
-        loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
 
-    enc_grads = tape.gradient(loss, encoder.trainable_variables)
-    dec_grads = tape.gradient(loss, decoder.trainable_variables)
+        message_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
+        residual_loss = tf.reduce_mean(tf.square(encoded - images))
+
+        total_loss = message_loss + lambda_r * residual_loss
+
+    enc_grads = tape.gradient(total_loss, encoder.trainable_variables)
+    dec_grads = tape.gradient(total_loss, decoder.trainable_variables)
 
     enc_opt.apply_gradients(zip(enc_grads, encoder.trainable_variables))
     dec_opt.apply_gradients(zip(dec_grads, decoder.trainable_variables))
 
-    return loss
+    return message_loss, residual_loss, total_loss
 
-print(f"Training {NUM_STEPS} steps with U-Net (constant→random)...", flush=True)
+print(f"Training {NUM_STEPS} steps with multi-loss scheduling...", flush=True)
 start_time = time.time()
 
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE, step)
-    loss = train_step(images, secrets)
+    msg_loss, res_loss, tot_loss = train_step(images, secrets, step)
 
-    if (step + 1) % 100 == 0:
+    if (step + 1) % 500 == 0:
         elapsed = (time.time() - start_time) / 60
-        phase = "const" if step < 1250 else (f"grad" if step < 2500 else "random")
-        print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] - Loss: {float(loss):.6f} ({elapsed:.1f}m)", flush=True)
+        phase = "const" if step < 5000 else ("grad" if step < 10000 else "random")
+        print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] Msg:{float(msg_loss):.4f} Res:{float(res_loss):.4f} Total:{float(tot_loss):.4f} ({elapsed:.1f}m)", flush=True)
 
 print("\nTesting...", flush=True)
 test_images, test_secrets = get_img_batch(BATCH_SIZE, NUM_STEPS)
