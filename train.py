@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import numpy as np
+import tensorflow as tf
+from tensorflow import keras
 import os
 import glob
 import time
@@ -9,26 +11,23 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['LD_LIBRARY_PATH'] = '/home/user/diffusers/pixel_art_venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-12.6/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/usr/local/cuda-12.6'
 
-import tensorflow as tf
-from tensorflow import keras
-
 physical_devices = tf.config.list_physical_devices('GPU')
 if physical_devices:
     for device in physical_devices:
         tf.config.experimental.set_memory_growth(device, True)
-    print(f"GPU: {len(physical_devices)} device(s)")
+    print(f"GPU: {len(physical_devices)} device(s)", flush=True)
 
 np.random.seed(42)
 tf.random.set_seed(42)
 
 TRAIN_PATH = '/home/user/StegaStamp-plus/data/train'
 HEIGHT, WIDTH = 256, 256
-SECRET_SIZE = 16
+SECRET_SIZE = 256
 BATCH_SIZE = 2
-NUM_STEPS = 4000
+NUM_STEPS = 5000
 LEARNING_RATE = 0.001
 
-print(f"Loading images from {TRAIN_PATH}...")
+print(f"Loading images from {TRAIN_PATH}...", flush=True)
 img_files = (glob.glob(os.path.join(TRAIN_PATH, '*.jpg')) +
              glob.glob(os.path.join(TRAIN_PATH, '*.png')) +
              glob.glob(os.path.join(TRAIN_PATH, '*.webp')))
@@ -42,61 +41,74 @@ for i, img_path in enumerate(img_files):
     cached_images.append(img.astype(np.float32))
 
 cached_images = np.array(cached_images, dtype=np.float32)
-print(f"✓ Cached {len(cached_images)} images ({HEIGHT}x{WIDTH})")
-
-def apply_perturbations(images, strength):
-    if strength < 0.01:
-        return images
-
-    perturbed = tf.identity(images)
-
-    if tf.random.uniform([]) < 0.3 * strength:
-        kernel = tf.ones((3, 3, 3, 1)) / 9.0
-        perturbed = tf.nn.depthwise_conv2d(perturbed, kernel, strides=[1, 1, 1, 1], padding='SAME')
-
-    if tf.random.uniform([]) < 0.3 * strength:
-        noise = tf.random.normal(tf.shape(perturbed), stddev=0.05 * strength)
-        perturbed = tf.clip_by_value(perturbed + noise, 0.0, 1.0)
-
-    if tf.random.uniform([]) < 0.3 * strength:
-        brightness = tf.random.uniform([], -0.1 * strength, 0.1 * strength)
-        perturbed = tf.clip_by_value(perturbed + brightness, 0.0, 1.0)
-
-    return perturbed
+print(f"✓ Cached {len(cached_images)} images ({HEIGHT}x{WIDTH})", flush=True)
 
 def get_img_batch(batch_size=BATCH_SIZE, step=0):
     indices = np.random.choice(len(cached_images), batch_size, replace=True)
     images = cached_images[indices]
 
-    pert_strength = min(1.0, max(0.0, (step - 500) / 1500.0))
-    images = apply_perturbations(tf.constant(images, dtype=tf.float32), pert_strength).numpy()
-
-    if step < 100:
+    if step < 1250:
         secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * 0.7
-    elif step < 200:
+    elif step < 2500:
         secrets = (np.random.rand(batch_size, SECRET_SIZE) * 0.2 + 0.6).astype(np.float32)
     else:
         secrets = (np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE))).astype(np.float32)
 
-    return tf.constant(images, dtype=tf.float32), tf.constant(secrets)
+    return tf.constant(images), tf.constant(secrets)
 
 class Encoder(keras.Model):
     def __init__(self):
         super().__init__()
-        self.secret_dense = keras.layers.Dense(64*64*3, activation='relu')
-        self.conv1 = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
-        self.conv2 = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
+        self.secret_dense = keras.layers.Dense(32*32*32, activation='relu')
+
+        self.down1 = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
+        self.down1b = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
+        self.pool1 = keras.layers.MaxPooling2D(2)
+
+        self.down2 = keras.layers.Conv2D(64, 3, padding='same', activation='relu')
+        self.down2b = keras.layers.Conv2D(64, 3, padding='same', activation='relu')
+        self.pool2 = keras.layers.MaxPooling2D(2)
+
+        self.down3 = keras.layers.Conv2D(128, 3, padding='same', activation='relu')
+        self.down3b = keras.layers.Conv2D(128, 3, padding='same', activation='relu')
+
+        self.up3 = keras.layers.UpSampling2D(2)
+        self.up3_conv = keras.layers.Conv2D(64, 3, padding='same', activation='relu')
+
+        self.up2 = keras.layers.UpSampling2D(2)
+        self.up2_conv = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
+
         self.final = keras.layers.Conv2D(3, 1, padding='same')
 
     def call(self, inputs):
         images, secrets = inputs
         batch_size = tf.shape(images)[0]
+
         secret_expanded = self.secret_dense(secrets)
-        secret_expanded = tf.reshape(secret_expanded, (batch_size, 64, 64, 3))
+        secret_expanded = tf.reshape(secret_expanded, (batch_size, 32, 32, 32))
         secret_expanded = tf.image.resize(secret_expanded, (HEIGHT, WIDTH))
+
         x = tf.concat([images, secret_expanded], axis=-1)
-        x = self.conv1(x)
-        x = self.conv2(x)
+
+        x1 = self.down1(x)
+        x1 = self.down1b(x1)
+        x = self.pool1(x1)
+
+        x2 = self.down2(x)
+        x2 = self.down2b(x2)
+        x = self.pool2(x2)
+
+        x = self.down3(x)
+        x = self.down3b(x)
+
+        x = self.up3(x)
+        x = tf.concat([x, x2], axis=-1)
+        x = self.up3_conv(x)
+
+        x = self.up2(x)
+        x = tf.concat([x, x1], axis=-1)
+        x = self.up2_conv(x)
+
         x = self.final(x)
         residual = tf.nn.tanh(x) * 0.1
         return images + residual
@@ -106,11 +118,10 @@ class Decoder(keras.Model):
         super().__init__()
         self.conv1 = keras.layers.Conv2D(32, 3, strides=2, padding='same', activation='relu')
         self.conv2 = keras.layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')
-        self.conv3 = keras.layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')
+        self.conv3 = keras.layers.Conv2D(128, 3, strides=2, padding='same', activation='relu')
         self.flatten = keras.layers.Flatten()
         self.dense1 = keras.layers.Dense(512, activation='relu')
-        self.dense2 = keras.layers.Dense(256, activation='relu')
-        self.dense3 = keras.layers.Dense(SECRET_SIZE)
+        self.dense2 = keras.layers.Dense(SECRET_SIZE)
 
     def call(self, inputs):
         x = self.conv1(inputs)
@@ -118,17 +129,16 @@ class Decoder(keras.Model):
         x = self.conv3(x)
         x = self.flatten(x)
         x = self.dense1(x)
-        x = self.dense2(x)
-        return self.dense3(x)
+        return self.dense2(x)
 
-print(f"Building models (secret_size={SECRET_SIZE}, img={HEIGHT}x{WIDTH})...")
+print(f"Building U-Net models (secret_size={SECRET_SIZE}, img={HEIGHT}x{WIDTH})...", flush=True)
 encoder = Encoder()
 decoder = Decoder()
 
 enc_opt = keras.optimizers.Adam(LEARNING_RATE)
 dec_opt = keras.optimizers.Adam(LEARNING_RATE)
 
-def train_step(images, secrets, step):
+def train_step(images, secrets):
     with tf.GradientTape(persistent=True) as tape:
         encoded = encoder([images, secrets], training=True)
         decoded = decoder(encoded, training=True)
@@ -136,32 +146,33 @@ def train_step(images, secrets, step):
 
     enc_grads = tape.gradient(loss, encoder.trainable_variables)
     dec_grads = tape.gradient(loss, decoder.trainable_variables)
+
     enc_opt.apply_gradients(zip(enc_grads, encoder.trainable_variables))
     dec_opt.apply_gradients(zip(dec_grads, decoder.trainable_variables))
 
     return loss
 
-print(f"Training {NUM_STEPS} steps with curriculum learning (constant→random)...")
+print(f"Training {NUM_STEPS} steps with U-Net (constant→random)...", flush=True)
 start_time = time.time()
 
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE, step)
-    loss = train_step(images, secrets, step)
+    loss = train_step(images, secrets)
 
     if (step + 1) % 100 == 0:
         elapsed = (time.time() - start_time) / 60
-        phase = "const" if step < 100 else ("grad" if step < 200 else "random")
-        print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] - Loss: {float(loss):.6f} ({elapsed:.1f}m)")
+        phase = "const" if step < 1250 else (f"grad" if step < 2500 else "random")
+        print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] - Loss: {float(loss):.6f} ({elapsed:.1f}m)", flush=True)
 
-print("\nTesting...")
+print("\nTesting...", flush=True)
 test_images, test_secrets = get_img_batch(BATCH_SIZE, NUM_STEPS)
 test_encoded = encoder([test_images, test_secrets], training=False)
 test_decoded = decoder(test_encoded, training=False)
 test_pred = (test_decoded.numpy() > 0.5).astype(int)
 test_true = (test_secrets.numpy() > 0.5).astype(int)
 accuracy = np.mean(test_pred == test_true)
-print(f"Test accuracy: {accuracy*100:.2f}%")
+print(f"Test accuracy: {accuracy*100:.2f}%", flush=True)
 
 encoder.save('encoder.keras')
 decoder.save('decoder.keras')
-print("✓ Done")
+print("✓ Done", flush=True)
