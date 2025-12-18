@@ -55,19 +55,16 @@ def augment_for_robustness(images, step):
 
     augmented = images
 
-    if tf.random.uniform(()) < 0.3 * aug_strength:
-        angle = tf.random.uniform((), -15, 15) * tf.constant(np.pi / 180.0)
-        cos_a = tf.cos(angle)
-        sin_a = tf.sin(angle)
-        rotated = tf.raw_ops.RotateImage(images=augmented, angle_rad=angle)
-        augmented = (1 - 0.3 * aug_strength) * augmented + 0.3 * aug_strength * rotated
-
     if tf.random.uniform(()) < 0.2 * aug_strength:
-        brightness = tf.random.uniform((), 0.8, 1.2)
+        brightness = tf.random.uniform((), 0.85, 1.15)
         augmented = tf.clip_by_value(augmented * brightness, 0.0, 1.0)
 
     if tf.random.uniform(()) < 0.2 * aug_strength:
-        noise = tf.random.normal(tf.shape(augmented), 0, 0.05 * aug_strength)
+        contrast = tf.random.uniform((), 0.85, 1.15)
+        augmented = tf.clip_by_value((augmented - 0.5) * contrast + 0.5, 0.0, 1.0)
+
+    if tf.random.uniform(()) < 0.15 * aug_strength:
+        noise = tf.random.normal(tf.shape(augmented), 0, 0.03 * aug_strength)
         augmented = tf.clip_by_value(augmented + noise, 0.0, 1.0)
 
     return tf.cast(augmented, tf.float32)
