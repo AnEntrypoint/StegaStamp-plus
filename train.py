@@ -174,16 +174,28 @@ def train_step(images, secrets, step):
 print(f"Training {NUM_STEPS} steps with multi-loss scheduling...", flush=True)
 start_time = time.time()
 
+const_end = int(NUM_STEPS * 0.25)
+grad_end = int(NUM_STEPS * 0.50)
+
+print(f"Training configuration:", flush=True)
+print(f"  Total steps: {NUM_STEPS} (Const: {const_end}, Grad: {grad_end-const_end}, Random: {NUM_STEPS-grad_end})", flush=True)
+print(f"  Loss schedule: message-only → gradual ramp → full multi-loss", flush=True)
+
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE, step)
     msg_loss, res_loss, tot_loss = train_step(images, secrets, step)
 
+    phase = "const" if step < const_end else ("grad" if step < grad_end else "random")
+
     if (step + 1) % 500 == 0:
         elapsed = (time.time() - start_time) / 60
-        const_end = int(NUM_STEPS * 0.25)
-        grad_end = int(NUM_STEPS * 0.50)
-        phase = "const" if step < const_end else ("grad" if step < grad_end else "random")
         print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] Msg:{float(msg_loss):.4f} Res:{float(res_loss):.4f} Total:{float(tot_loss):.4f} ({elapsed:.1f}m)", flush=True)
+
+    if (step + 1) % 10000 == 0:
+        elapsed = (time.time() - start_time) / 60
+        encoder.save(f'encoder_step_{step+1}.keras')
+        decoder.save(f'decoder_step_{step+1}.keras')
+        print(f"✓ Checkpoint saved at step {step+1} ({elapsed:.1f}m)", flush=True)
 
 print("\nTesting...", flush=True)
 test_images, test_secrets = get_img_batch(BATCH_SIZE, NUM_STEPS)
