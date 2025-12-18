@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
 import os
 import glob
 import time
@@ -10,6 +8,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['LD_LIBRARY_PATH'] = '/home/user/diffusers/pixel_art_venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-12.6/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
 os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/usr/local/cuda-12.6'
+
+import tensorflow as tf
+from tensorflow import keras
 
 physical_devices = tf.config.list_physical_devices('GPU')
 if physical_devices:
@@ -22,9 +23,9 @@ tf.random.set_seed(42)
 
 TRAIN_PATH = '/home/user/StegaStamp-plus/data/train'
 HEIGHT, WIDTH = 256, 256
-SECRET_SIZE = 8
+SECRET_SIZE = 16
 BATCH_SIZE = 2
-NUM_STEPS = 2000
+NUM_STEPS = 4000
 LEARNING_RATE = 0.001
 
 print(f"Loading images from {TRAIN_PATH}...")
@@ -43,9 +44,32 @@ for i, img_path in enumerate(img_files):
 cached_images = np.array(cached_images, dtype=np.float32)
 print(f"✓ Cached {len(cached_images)} images ({HEIGHT}x{WIDTH})")
 
+def apply_perturbations(images, strength):
+    if strength < 0.01:
+        return images
+
+    perturbed = tf.identity(images)
+
+    if tf.random.uniform([]) < 0.3 * strength:
+        kernel = tf.ones((3, 3, 3, 1)) / 9.0
+        perturbed = tf.nn.depthwise_conv2d(perturbed, kernel, strides=[1, 1, 1, 1], padding='SAME')
+
+    if tf.random.uniform([]) < 0.3 * strength:
+        noise = tf.random.normal(tf.shape(perturbed), stddev=0.05 * strength)
+        perturbed = tf.clip_by_value(perturbed + noise, 0.0, 1.0)
+
+    if tf.random.uniform([]) < 0.3 * strength:
+        brightness = tf.random.uniform([], -0.1 * strength, 0.1 * strength)
+        perturbed = tf.clip_by_value(perturbed + brightness, 0.0, 1.0)
+
+    return perturbed
+
 def get_img_batch(batch_size=BATCH_SIZE, step=0):
     indices = np.random.choice(len(cached_images), batch_size, replace=True)
     images = cached_images[indices]
+
+    pert_strength = min(1.0, max(0.0, (step - 500) / 1500.0))
+    images = apply_perturbations(tf.constant(images, dtype=tf.float32), pert_strength).numpy()
 
     if step < 100:
         secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * 0.7
@@ -54,7 +78,7 @@ def get_img_batch(batch_size=BATCH_SIZE, step=0):
     else:
         secrets = (np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE))).astype(np.float32)
 
-    return tf.constant(images), tf.constant(secrets)
+    return tf.constant(images, dtype=tf.float32), tf.constant(secrets)
 
 class Encoder(keras.Model):
     def __init__(self):
@@ -84,8 +108,9 @@ class Decoder(keras.Model):
         self.conv2 = keras.layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')
         self.conv3 = keras.layers.Conv2D(64, 3, strides=2, padding='same', activation='relu')
         self.flatten = keras.layers.Flatten()
-        self.dense1 = keras.layers.Dense(256, activation='relu')
-        self.dense2 = keras.layers.Dense(SECRET_SIZE)
+        self.dense1 = keras.layers.Dense(512, activation='relu')
+        self.dense2 = keras.layers.Dense(256, activation='relu')
+        self.dense3 = keras.layers.Dense(SECRET_SIZE)
 
     def call(self, inputs):
         x = self.conv1(inputs)
@@ -93,7 +118,8 @@ class Decoder(keras.Model):
         x = self.conv3(x)
         x = self.flatten(x)
         x = self.dense1(x)
-        return self.dense2(x)
+        x = self.dense2(x)
+        return self.dense3(x)
 
 print(f"Building models (secret_size={SECRET_SIZE}, img={HEIGHT}x{WIDTH})...")
 encoder = Encoder()
