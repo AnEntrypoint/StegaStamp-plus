@@ -43,6 +43,35 @@ for i, img_path in enumerate(img_files):
 cached_images = np.array(cached_images, dtype=np.float32)
 print(f"✓ Cached {len(cached_images)} images ({HEIGHT}x{WIDTH})", flush=True)
 
+def augment_for_robustness(images, step):
+    batch_size = tf.shape(images)[0]
+    const_end = int(NUM_STEPS * 0.25)
+    grad_end = int(NUM_STEPS * 0.50)
+
+    aug_strength = min(1.0, step / (const_end * 0.5))
+
+    if step >= const_end:
+        aug_strength = min(1.0, (step - const_end) / (grad_end - const_end) * 0.8 + 0.2)
+
+    augmented = images
+
+    if tf.random.uniform(()) < 0.3 * aug_strength:
+        angle = tf.random.uniform((), -15, 15) * tf.constant(np.pi / 180.0)
+        cos_a = tf.cos(angle)
+        sin_a = tf.sin(angle)
+        rotated = tf.raw_ops.RotateImage(images=augmented, angle_rad=angle)
+        augmented = (1 - 0.3 * aug_strength) * augmented + 0.3 * aug_strength * rotated
+
+    if tf.random.uniform(()) < 0.2 * aug_strength:
+        brightness = tf.random.uniform((), 0.8, 1.2)
+        augmented = tf.clip_by_value(augmented * brightness, 0.0, 1.0)
+
+    if tf.random.uniform(()) < 0.2 * aug_strength:
+        noise = tf.random.normal(tf.shape(augmented), 0, 0.05 * aug_strength)
+        augmented = tf.clip_by_value(augmented + noise, 0.0, 1.0)
+
+    return tf.cast(augmented, tf.float32)
+
 def get_img_batch(batch_size=BATCH_SIZE, step=0):
     indices = np.random.choice(len(cached_images), batch_size, replace=True)
     images = cached_images[indices]
@@ -51,7 +80,9 @@ def get_img_batch(batch_size=BATCH_SIZE, step=0):
     grad_end = int(NUM_STEPS * 0.50)
 
     if step < const_end:
-        secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * 0.7
+        const_val = 0.2 + (step // 1000) * 0.1
+        const_val = min(const_val, 0.9)
+        secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * const_val
     elif step < grad_end:
         secrets = (np.random.rand(batch_size, SECRET_SIZE) * 0.2 + 0.6).astype(np.float32)
     else:
@@ -138,25 +169,40 @@ print(f"Building paper-based models with multi-loss...", flush=True)
 encoder = Encoder()
 decoder = Decoder()
 
+def lr_schedule(step):
+    if step < NUM_STEPS * 0.7:
+        return LEARNING_RATE
+    elif step < NUM_STEPS * 0.9:
+        return LEARNING_RATE * 0.5
+    else:
+        return LEARNING_RATE * 0.1
+
 enc_opt = keras.optimizers.Adam(LEARNING_RATE)
 dec_opt = keras.optimizers.Adam(LEARNING_RATE)
 
 def loss_schedule(step):
     total_steps = NUM_STEPS
-    if step < total_steps * 0.15:
+    if step < total_steps * 0.1:
         return 0.0
     elif step < total_steps * 0.5:
-        r_weight = (step - total_steps * 0.15) / (total_steps * 0.35)
-        return r_weight
+        r_weight = (step - total_steps * 0.1) / (total_steps * 0.4)
+        return r_weight * 0.5
     else:
         return 1.0
 
 def train_step(images, secrets, step):
     lambda_r = loss_schedule(step)
+    lr = lr_schedule(step)
+
+    enc_opt.learning_rate.assign(lr)
+    dec_opt.learning_rate.assign(lr)
 
     with tf.GradientTape(persistent=True) as tape:
         encoded = encoder([images, secrets], training=True)
-        decoded = decoder(encoded, training=True)
+
+        augmented = augment_for_robustness(encoded, step)
+
+        decoded = decoder(augmented, training=True)
 
         message_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
         residual_loss = tf.reduce_mean(tf.square(encoded - images))
