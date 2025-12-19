@@ -25,3 +25,7 @@ coverage/
 
 vite-env.d.ts
 data/
+*.keras
+*.h5
+public/*.wasm
+.xet/
