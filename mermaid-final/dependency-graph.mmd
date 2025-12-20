@@ -1,0 +1,22 @@
+graph TB
+package_json["package.json"]
+src_App_tsx["App.tsx"]
+src_components_Decoder_tsx["Decoder.tsx"]
+src_components_Encoder_tsx["Encoder.tsx"]
+src_hooks_useStegaStamp_ts["useStegaStamp.ts"]
+src_main_tsx["main.tsx"]
+src_models_StegaStampModel_ts["StegaStampModel.ts"]
+src_utils_bch_ts["bch.ts"]
+src_utils_imageProcessing_ts["imageProcessing.ts"]
+train_py["train.py"]
+train_resume_py["train_resume.py"]
+tsconfig_node_json["tsconfig.node.json"]
+vite_config_ts["vite.config.ts"]
+src_components_Encoder_tsx --> src_App_tsx
+src_components_Decoder_tsx --> src_App_tsx
+src_utils_imageProcessing_ts --> src_components_Decoder_tsx
+src_hooks_useStegaStamp_ts --> src_components_Decoder_tsx
+src_utils_imageProcessing_ts --> src_components_Encoder_tsx
+src_hooks_useStegaStamp_ts --> src_components_Encoder_tsx
+src_models_StegaStampModel_ts --> src_hooks_useStegaStamp_ts
+src_App_tsx --> src_main_tsx
