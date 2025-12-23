@@ -240,10 +240,28 @@ print(f"Training 256-bit secrets for {NUM_STEPS} steps...", flush=True)
 print(f"Phase 1 (secret-only): steps 0-14000 | Phase 2 (ramp): 14001-56000 | Phase 3 (full): 56001-140000", flush=True)
 print("Features: Multi-loss (secret + L2 + LPIPS), Adversarial critic, geometric invariance", flush=True)
 print("Validation: Accuracy tested at every checkpoint. Training aborts if model not learning.", flush=True)
+print("Directionality: Tracking loss trends, convergence, and training direction at each step.", flush=True)
 
 phase1_end = int(NUM_STEPS * 0.1)
 phase2_end = int(NUM_STEPS * 0.4)
 prev_loss = None
+prev_acc = None
+loss_window = []
+acc_window = []
+window_size = 10
+no_improvement_steps = 0
+max_no_improve = 5000
+
+def get_direction(current, previous, threshold=0.01):
+    if previous is None:
+        return "→"
+    delta = (previous - current) / (previous + 1e-8)
+    if delta > threshold:
+        return "↓"
+    elif delta < -threshold:
+        return "↑"
+    else:
+        return "→"
 
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE)
@@ -252,6 +270,10 @@ for step in range(NUM_STEPS):
 
     secret_scale, l2_scale, critic_scale = get_loss_scales(step, NUM_STEPS)
     sec_loss, l2_loss, lpips, crit_loss, tot_loss, residual = train_step(images, secrets, secret_scale, l2_scale, critic_scale)
+
+    loss_window.append(float(tot_loss))
+    if len(loss_window) > window_size:
+        loss_window.pop(0)
 
     if (step + 1) % 50 == 0:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
@@ -262,7 +284,11 @@ for step in range(NUM_STEPS):
             phase = "P2"
         else:
             phase = "P3"
-        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f} Critic:{float(crit_loss):.4f} Total:{float(tot_loss):.4f} | ResidualMag:{res_mean:.6f} | L2scale:{float(l2_scale):.4f}", flush=True)
+
+        direction = get_direction(np.mean(loss_window), prev_loss)
+        loss_trend = f"{direction} {np.mean(loss_window):.4f}"
+
+        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Total:{loss_trend} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f} Critic:{float(crit_loss):.4f} | ResidualMag:{res_mean:.6f} | L2scale:{float(l2_scale):.4f}", flush=True)
 
     if step < 5:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
@@ -271,22 +297,39 @@ for step in range(NUM_STEPS):
     if (step + 1) % CHECKPOINT_INTERVAL == 0:
         print(f"\n[CHECKPOINT] Validating step {step+1}...", flush=True)
         val_acc, val_loss = validate_checkpoint(encoder, decoder)
-        print(f"[CHECKPOINT] Validation accuracy: {val_acc:.4f} | Validation loss: {val_loss:.4f}", flush=True)
+        acc_window.append(val_acc)
+        if len(acc_window) > window_size:
+            acc_window.pop(0)
+
+        acc_direction = get_direction(val_acc, prev_acc)
+        loss_direction = get_direction(val_loss, prev_loss)
+
+        print(f"[CHECKPOINT] Accuracy: {acc_direction} {val_acc:.4f} | Loss: {loss_direction} {val_loss:.4f}", flush=True)
 
         if val_acc <= 0.5:
             print(f"✗ ABORT: Model not learning! Accuracy at {val_acc:.4f} (random baseline: 0.5)", flush=True)
             print(f"Training failed at step {step+1}. Model did not converge.", flush=True)
             exit(1)
 
-        if prev_loss is not None and val_loss >= prev_loss * 0.95:
-            print(f"⚠ WARNING: Loss not improving. Prev: {prev_loss:.4f}, Current: {val_loss:.4f}", flush=True)
+        if prev_loss is not None and val_loss >= prev_loss * 0.98:
+            no_improvement_steps += CHECKPOINT_INTERVAL
+            if no_improvement_steps > max_no_improve:
+                print(f"✗ ABORT: No improvement for {no_improvement_steps} steps. Loss plateau detected.", flush=True)
+                exit(1)
+            print(f"⚠ WARNING: Loss not improving ({no_improvement_steps}/{max_no_improve} steps). Prev: {prev_loss:.4f}, Current: {val_loss:.4f}", flush=True)
+        else:
+            no_improvement_steps = 0
+
+        avg_acc = np.mean(acc_window)
+        print(f"[CHECKPOINT] Avg accuracy (last {len(acc_window)} checkpoints): {avg_acc:.4f}", flush=True)
 
         encoder.save(f'encoder_256bit_step_{step+1}.keras')
         decoder.save(f'decoder_256bit_step_{step+1}.keras')
         critic.save(f'critic_256bit_step_{step+1}.keras')
         checkpoint_mb = os.path.getsize(f'encoder_256bit_step_{step+1}.keras') / (1024*1024)
-        print(f"✓ CHECKPOINT SAVED: step {step+1} ({checkpoint_mb:.0f}MB) | Accuracy: {val_acc:.4f} | Loss: {val_loss:.4f}", flush=True)
+        print(f"✓ CHECKPOINT SAVED: step {step+1} ({checkpoint_mb:.0f}MB) | Accuracy: {val_acc:.4f} {acc_direction} | Loss: {val_loss:.4f} {loss_direction}", flush=True)
         prev_loss = val_loss
+        prev_acc = val_acc
         print()
 
 encoder.save('encoder_256bit_final.keras')
