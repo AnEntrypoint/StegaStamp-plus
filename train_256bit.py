@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import os
+import sys
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import glob
 from PIL import Image, ImageOps
+import hashlib
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -17,14 +19,21 @@ LEARNING_RATE = 0.0001
 CRITIC_RATE = 0.0001
 CHECKPOINT_INTERVAL = 10000
 VALIDATION_BATCHES = 10
+DEBUG = True
 
-print("Loading training images...", flush=True)
+print("=" * 80)
+print("STEGASTAMP 256-BIT DEBUG TRAINING")
+print("=" * 80)
+print(f"Random seed: {os.environ.get('PYTHONHASHSEED', 'not set')}", flush=True)
+
+print("\nLoading training images...", flush=True)
 img_files = (glob.glob(os.path.join(TRAIN_PATH, '*.jpg')) +
              glob.glob(os.path.join(TRAIN_PATH, '*.png')) +
              glob.glob(os.path.join(TRAIN_PATH, '*.webp')))
 if not img_files:
     raise FileNotFoundError(f"No images in {TRAIN_PATH}")
 print(f"Found {len(img_files)} images", flush=True)
+print(f"First image: {img_files[0]}", flush=True)
 
 def get_img_batch(batch_size=BATCH_SIZE):
     batch_cover = []
@@ -45,17 +54,41 @@ def get_img_batch(batch_size=BATCH_SIZE):
 
     return np.array(batch_cover), np.array(batch_secret)
 
+def validate_batch(images, secrets, name="batch"):
+    has_nan_img = np.isnan(images).any()
+    has_inf_img = np.isinf(images).any()
+    has_nan_sec = np.isnan(secrets).any()
+    has_inf_sec = np.isinf(secrets).any()
+
+    img_min, img_max = np.min(images), np.max(images)
+    sec_min, sec_max = np.min(secrets), np.max(secrets)
+
+    if has_nan_img or has_inf_img or has_nan_sec or has_inf_sec:
+        print(f"✗ INVALID {name}: NaN={has_nan_img or has_nan_sec}, Inf={has_inf_img or has_inf_sec}", flush=True)
+        return False
+
+    if DEBUG and (img_min < -0.6 or img_max > 0.6 or sec_min < -0.1 or sec_max > 1.1):
+        print(f"⚠ WARNING {name}: Image range [{img_min:.4f}, {img_max:.4f}], Secret range [{sec_min:.4f}, {sec_max:.4f}]", flush=True)
+
+    return True
+
 def validate_checkpoint(encoder, decoder, num_batches=VALIDATION_BATCHES):
     accuracies = []
     secret_losses = []
 
     for _ in range(num_batches):
         images, secrets = get_img_batch(BATCH_SIZE)
+        validate_batch(images, secrets, "validation")
         images = tf.constant(images)
         secrets = tf.constant(secrets)
 
         residual = encoder([secrets, images], training=False)
         encoded = images + residual
+
+        if tf.reduce_any(tf.math.is_nan(residual)) or tf.reduce_any(tf.math.is_inf(residual)):
+            print(f"✗ NaN/Inf in residual!", flush=True)
+            return 0.0, float('inf')
+
         decoded = decoder(encoded, training=False)
 
         secret_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
@@ -181,10 +214,24 @@ class CriticNetwork(keras.Model):
         image = image - 0.5
         return self.layers_seq(image)
 
-print("Building models...", flush=True)
+print("\nBuilding models...", flush=True)
 encoder = StegaStampEncoder()
 decoder = StegaStampDecoder()
 critic = CriticNetwork()
+
+test_img = tf.constant(np.zeros((1, 400, 400, 3), dtype=np.float32))
+test_secret = tf.constant(np.zeros((1, 256), dtype=np.float32))
+_ = encoder([test_secret, test_img])
+_ = decoder(test_img)
+_ = critic(test_img)
+print("✓ Model shapes verified", flush=True)
+
+encoder_params = encoder.count_params()
+decoder_params = decoder.count_params()
+critic_params = critic.count_params()
+print(f"Encoder params: {encoder_params:,}", flush=True)
+print(f"Decoder params: {decoder_params:,}", flush=True)
+print(f"Critic params: {critic_params:,}", flush=True)
 
 enc_opt = keras.optimizers.Adam(LEARNING_RATE)
 dec_opt = keras.optimizers.Adam(LEARNING_RATE)
@@ -197,6 +244,11 @@ def lpips_loss(original, reconstructed):
 def train_step(images, secrets, secret_scale, l2_scale, critic_scale):
     with tf.GradientTape(persistent=True) as tape:
         residual = encoder([secrets, images], training=True)
+
+        if tf.reduce_any(tf.math.is_nan(residual)) or tf.reduce_any(tf.math.is_inf(residual)):
+            print(f"✗ NaN/Inf detected in residual!", flush=True)
+            return None, None, None, None, None, None
+
         encoded = images + residual
         decoded = decoder(encoded, training=True)
         critic_real = critic(images, training=True)
@@ -212,6 +264,11 @@ def train_step(images, secrets, secret_scale, l2_scale, critic_scale):
     enc_grads = tape.gradient(total_loss, encoder.trainable_variables)
     dec_grads = tape.gradient(total_loss, decoder.trainable_variables)
     critic_grads = tape.gradient(critic_loss, critic.trainable_variables)
+
+    for grad, var in zip(enc_grads, encoder.trainable_variables):
+        if tf.reduce_any(tf.math.is_nan(grad)) or tf.reduce_any(tf.math.is_inf(grad)):
+            print(f"✗ NaN/Inf gradient in encoder {var.name}!", flush=True)
+            return None, None, None, None, None, None
 
     enc_opt.apply_gradients(zip(enc_grads, encoder.trainable_variables))
     dec_opt.apply_gradients(zip(dec_grads, decoder.trainable_variables))
@@ -236,11 +293,11 @@ def get_loss_scales(step, total_steps):
 
     return secret_scale, l2_scale, critic_scale
 
-print(f"Training 256-bit secrets for {NUM_STEPS} steps...", flush=True)
+print(f"\nTraining 256-bit secrets for {NUM_STEPS} steps...", flush=True)
 print(f"Phase 1 (secret-only): steps 0-14000 | Phase 2 (ramp): 14001-56000 | Phase 3 (full): 56001-140000", flush=True)
 print("Features: Multi-loss (secret + L2 + LPIPS), Adversarial critic, geometric invariance", flush=True)
 print("Validation: Accuracy tested at every checkpoint. Training aborts if model not learning.", flush=True)
-print("Directionality: Tracking loss trends, convergence, and training direction at each step.", flush=True)
+print("Debug: Monitoring NaN/Inf, gradient flow, loss components, weight statistics.", flush=True)
 
 phase1_end = int(NUM_STEPS * 0.1)
 phase2_end = int(NUM_STEPS * 0.4)
@@ -263,13 +320,28 @@ def get_direction(current, previous, threshold=0.01):
     else:
         return "→"
 
+print("\n" + "="*80)
+print("STARTING TRAINING LOOP")
+print("="*80 + "\n", flush=True)
+
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE)
+
+    if not validate_batch(images, secrets, f"step {step+1}"):
+        print(f"✗ ABORT: Invalid data at step {step+1}", flush=True)
+        exit(1)
+
     images = tf.constant(images)
     secrets = tf.constant(secrets)
 
     secret_scale, l2_scale, critic_scale = get_loss_scales(step, NUM_STEPS)
-    sec_loss, l2_loss, lpips, crit_loss, tot_loss, residual = train_step(images, secrets, secret_scale, l2_scale, critic_scale)
+    result = train_step(images, secrets, secret_scale, l2_scale, critic_scale)
+
+    if result[0] is None:
+        print(f"✗ ABORT: Training step failed at step {step+1}", flush=True)
+        exit(1)
+
+    sec_loss, l2_loss, lpips, crit_loss, tot_loss, residual = result
 
     loss_window.append(float(tot_loss))
     if len(loss_window) > window_size:
@@ -277,7 +349,10 @@ for step in range(NUM_STEPS):
 
     if (step + 1) % 50 == 0:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
+        res_std = tf.math.reduce_std(tf.abs(residual)).numpy()
         res_max = tf.reduce_max(tf.abs(residual)).numpy()
+        res_min = tf.reduce_min(tf.abs(residual)).numpy()
+
         if step < phase1_end:
             phase = "P1"
         elif step < phase2_end:
@@ -288,14 +363,19 @@ for step in range(NUM_STEPS):
         direction = get_direction(np.mean(loss_window), prev_loss)
         loss_trend = f"{direction} {np.mean(loss_window):.4f}"
 
-        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Total:{loss_trend} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f} Critic:{float(crit_loss):.4f} | ResidualMag:{res_mean:.6f} | L2scale:{float(l2_scale):.4f}", flush=True)
+        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Total:{loss_trend} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f} Critic:{float(crit_loss):.4f} | Res:{res_mean:.6f}±{res_std:.6f} [min:{res_min:.6f} max:{res_max:.6f}] | L2scale:{float(l2_scale):.4f}", flush=True)
 
     if step < 5:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
-        print(f"[INIT Step {step}] Residual:{res_mean:.8f} L2:{float(l2_loss):.8f} Critic:{float(crit_loss):.8f}", flush=True)
+        res_min = tf.reduce_min(tf.abs(residual)).numpy()
+        res_max = tf.reduce_max(tf.abs(residual)).numpy()
+        decoded_min = float(tf.reduce_min(decoder(images + residual, training=False)))
+        decoded_max = float(tf.reduce_max(decoder(images + residual, training=False)))
+        print(f"[INIT Step {step}] Residual:{res_mean:.8f} [min:{res_min:.8f} max:{res_max:.8f}] | Decoded logits [{decoded_min:.4f}, {decoded_max:.4f}] | L2:{float(l2_loss):.8f} Critic:{float(crit_loss):.8f}", flush=True)
 
     if (step + 1) % CHECKPOINT_INTERVAL == 0:
-        print(f"\n[CHECKPOINT] Validating step {step+1}...", flush=True)
+        print(f"\n{'='*80}")
+        print(f"[CHECKPOINT] Validating step {step+1}...", flush=True)
         val_acc, val_loss = validate_checkpoint(encoder, decoder)
         acc_window.append(val_acc)
         if len(acc_window) > window_size:
@@ -328,12 +408,14 @@ for step in range(NUM_STEPS):
         critic.save(f'critic_256bit_step_{step+1}.keras')
         checkpoint_mb = os.path.getsize(f'encoder_256bit_step_{step+1}.keras') / (1024*1024)
         print(f"✓ CHECKPOINT SAVED: step {step+1} ({checkpoint_mb:.0f}MB) | Accuracy: {val_acc:.4f} {acc_direction} | Loss: {val_loss:.4f} {loss_direction}", flush=True)
+        print(f"{'='*80}\n", flush=True)
         prev_loss = val_loss
         prev_acc = val_acc
-        print()
 
 encoder.save('encoder_256bit_final.keras')
 decoder.save('decoder_256bit_final.keras')
 critic.save('critic_256bit_final.keras')
-print("\n✓ Training complete with all paper features!", flush=True)
+print("\n" + "="*80)
+print("✓ Training complete with all paper features!", flush=True)
 print("✓ All checkpoints validated and passed accuracy threshold.", flush=True)
+print("="*80)
