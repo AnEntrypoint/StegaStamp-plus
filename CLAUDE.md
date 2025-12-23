@@ -1,16 +1,14 @@
 # Training Status & Implementation Notes
 
-## Current Status: GPU TensorFlow Installation and Training Baseline (Dec 21, 2025)
+## Current Status: 100-bit and 256-bit Training Ready (Dec 21, 2025)
 
-**Objective**: Establish working 100-bit training baseline on GPU using TensorFlow 2.16.2 with CUDA support, targeting 140k steps as documented in original StegaStamp paper by Tancik et al. 2020.
+**Objective**: Both 100-bit and 256-bit training implementations complete and ready for execution on GPU system. Following Tancik et al. 2020 StegaStamp paper targeting 140k steps for full training.
 
-**Known Issues & Solutions Applied**: Training loss plateau at 0.6931 (random baseline) observed in previous attempts. Graph function decorator suspected as cause due to eager execution requirements. Architecture uses U-Net encoder with secret embedding, multi-loss training combining secret classification loss plus L2 image reconstruction loss, and Adam optimizer. Data uses 400 by 400 RGB images normalized to negative 0.5 to positive 0.5 range. Training structured with 140k total steps using curriculum learning across constant, gradual, and random secret phases.
+**Implementation Complete**: Codebase cleaned to contain only production files. Duplicate test/debug/documentation files removed. Two training scripts ready: train_100bit.py for baseline (100-bit secrets) and train_256bit.py for full model (256-bit secrets). Both implement identical U-Net encoder architecture with multi-loss training combining secret classification loss plus L2 image reconstruction loss with scheduling.
 
-**Current Priority**: Complete GPU-enabled TensorFlow 2.16.2 installation with CUDA 12.3 support. RTX 3060 GPU confirmed available. Once installation complete, run training baseline to verify loss signals and model learning before scaling to 256-bit implementation.
+**Architecture Design** (based on original paper): Encoder implements U-Net taking secret input through 7500 dimension dense representation expanding to 50 by 50 by 3 spatial tensor, upsampled to 400 by 400, with 5 downsampling layers and 4 upsampling layers with skip connections. Decoder implements 5-layer convolutional network with 2 by 2 strides, flattening layer, 512 dimension dense layer, then outputs secret logits (100 for train_100bit.py, 256 for train_256bit.py). Multi-loss combines secret loss weighted 1.5 plus L2 loss with scheduling ramping from 0 to 2.0 over first 14000 steps. Optimizer uses Adam with learning rate 0.0001. Batch size 4 images per step. Data uses 400 by 400 RGB images normalized to negative 0.5 to positive 0.5 range.
 
-**Architecture Design** (based on original paper): Encoder implements U-Net taking 100-bit input through dense representation expanding to spatial feature tensor, with downsampling and upsampling paths with skip connections. Decoder implements convolutional network reducing spatial dimensions and classifying secrets. Multi-loss combines secret loss plus L2 reconstruction loss with scheduling. Optimizer uses Adam learning rate 0.0001. Batch size 4 images per step.
-
-**Files to Verify/Execute**: train_100bit.py contains baseline training procedure. test_100bit_decoder.py provides inference testing. Training expected to complete in approximately 40 hours on GPU hardware once installation verified.
+**Execution**: Run using train.sh wrapper script. Usage: ./train.sh 100 for 100-bit baseline or ./train.sh 256 for 256-bit full model. Both scripts save checkpoints every 10000 steps and final model after 140000 steps.
 
 ## Training Approach & Paper Reference
 
