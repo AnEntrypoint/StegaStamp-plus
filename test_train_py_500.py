@@ -8,8 +8,7 @@ import time
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['LD_LIBRARY_PATH'] = '/home/user/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/cuda-12.6/targets/x86_64-linux/lib:/usr/local/cuda-12.6/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
-os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/usr/local/cuda-12.6'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
 physical_devices = tf.config.list_physical_devices('GPU')
 if physical_devices:
@@ -23,8 +22,8 @@ tf.random.set_seed(42)
 TRAIN_PATH = '/home/user/StegaStamp-plus/data/train'
 HEIGHT, WIDTH = 256, 256
 SECRET_SIZE = 256
-BATCH_SIZE = 1
-NUM_STEPS = 140000
+BATCH_SIZE = 2
+NUM_STEPS = 500
 LEARNING_RATE = 0.0001
 
 print(f"Loading images from {TRAIN_PATH}...", flush=True)
@@ -78,19 +77,18 @@ def get_img_batch(batch_size=BATCH_SIZE, step=0):
 
     if step < const_end:
         const_val = 0.2 + (step // 1000) * 0.1
-        const_val = min(const_val, 0.9)
         secrets = np.ones((batch_size, SECRET_SIZE), dtype=np.float32) * const_val
     elif step < grad_end:
-        secrets = (np.random.rand(batch_size, SECRET_SIZE) * 0.2 + 0.6).astype(np.float32)
+        secrets = np.random.uniform(0.2, 0.8, (batch_size, SECRET_SIZE)).astype(np.float32)
     else:
-        secrets = (np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE))).astype(np.float32)
+        secrets = np.random.binomial(1, 0.5, (batch_size, SECRET_SIZE)).astype(np.float32)
 
-    return tf.constant(images), tf.constant(secrets)
+    return images.astype(np.float32), secrets.astype(np.float32)
 
 class Encoder(keras.Model):
     def __init__(self):
         super().__init__()
-        self.secret_dense = keras.layers.Dense(32*32*32, activation='relu')
+        self.secret_dense = keras.layers.Dense(256 * 32 * 32)
 
         self.down1 = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
         self.down1b = keras.layers.Conv2D(32, 3, padding='same', activation='relu')
@@ -116,7 +114,7 @@ class Encoder(keras.Model):
         batch_size = tf.shape(images)[0]
 
         secret_expanded = self.secret_dense(secrets)
-        secret_expanded = tf.reshape(secret_expanded, (batch_size, 32, 32, 32))
+        secret_expanded = tf.reshape(secret_expanded, (batch_size, 32, 32, 256))
         secret_expanded = tf.image.resize(secret_expanded, (HEIGHT, WIDTH))
 
         x = tf.concat([images, secret_expanded], axis=-1)
@@ -162,7 +160,7 @@ class Decoder(keras.Model):
         x = self.dense1(x)
         return self.dense2(x)
 
-print(f"Building paper-based models with multi-loss...", flush=True)
+print(f"Building models...", flush=True)
 encoder = Encoder()
 decoder = Decoder()
 
@@ -196,9 +194,7 @@ def train_step(images, secrets, step):
 
     with tf.GradientTape(persistent=True) as tape:
         encoded = encoder([images, secrets], training=True)
-
         augmented = augment_for_robustness(encoded, step)
-
         decoded = decoder(augmented, training=True)
 
         message_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
@@ -222,33 +218,37 @@ grad_end = int(NUM_STEPS * 0.50)
 
 print(f"Training configuration:", flush=True)
 print(f"  Total steps: {NUM_STEPS} (Const: {const_end}, Grad: {grad_end-const_end}, Random: {NUM_STEPS-grad_end})", flush=True)
-print(f"  Loss schedule: message-only → gradual ramp → full multi-loss", flush=True)
+print(f"  Loss schedule: message-only → gradual ramp → full multi-loss\n", flush=True)
 
+losses = []
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE, step)
-    msg_loss, res_loss, tot_loss = train_step(images, secrets, step)
+    images_tf = tf.constant(images)
+    secrets_tf = tf.constant(secrets)
+    msg_loss, res_loss, tot_loss = train_step(images_tf, secrets_tf, step)
+    losses.append(float(msg_loss))
 
     phase = "const" if step < const_end else ("grad" if step < grad_end else "random")
 
-    if (step + 1) % 500 == 0:
+    if (step + 1) % 50 == 0:
         elapsed = (time.time() - start_time) / 60
-        print(f"Step {step+1}/{NUM_STEPS} [{phase:5s}] Msg:{float(msg_loss):.4f} Res:{float(res_loss):.4f} Total:{float(tot_loss):.4f} ({elapsed:.1f}m)", flush=True)
+        avg_loss = np.mean(losses[-50:])
+        trend = "↓ LEARNING" if avg_loss < 0.69 else "→ Random"
+        print(f"Step {step+1:3d}/500 [{phase:5s}] Msg:{float(msg_loss):.4f} Res:{float(res_loss):.4f} Total:{float(tot_loss):.4f} (avg50:{avg_loss:.4f}) {trend} ({elapsed:.1f}m)", flush=True)
 
-    if (step + 1) % 10000 == 0:
-        elapsed = (time.time() - start_time) / 60
-        encoder.save(f'encoder_step_{step+1}.keras')
-        decoder.save(f'decoder_step_{step+1}.keras')
-        print(f"✓ Checkpoint saved at step {step+1} ({elapsed:.1f}m)", flush=True)
+print("\n" + "="*80)
+print("SUMMARY")
+print("="*80)
+initial_loss = np.mean(losses[:10])
+final_loss = np.mean(losses[-50:])
+improvement = ((initial_loss - final_loss) / initial_loss) * 100
 
-print("\nTesting...", flush=True)
-test_images, test_secrets = get_img_batch(BATCH_SIZE, NUM_STEPS)
-test_encoded = encoder([test_images, test_secrets], training=False)
-test_decoded = decoder(test_encoded, training=False)
-test_pred = (test_decoded.numpy() > 0.5).astype(int)
-test_true = (test_secrets.numpy() > 0.5).astype(int)
-accuracy = np.mean(test_pred == test_true)
-print(f"Test accuracy: {accuracy*100:.2f}%", flush=True)
+print(f"Initial loss (first 10): {initial_loss:.6f}")
+print(f"Final loss (last 50):    {final_loss:.6f}")
+print(f"Improvement:             {improvement:.1f}%")
+print(f"Random baseline:         0.693147")
 
-encoder.save('encoder.keras')
-decoder.save('decoder.keras')
-print("✓ Done", flush=True)
+if final_loss < 0.69:
+    print(f"\n✓✓✓ TRAIN.PY ARCHITECTURE IS LEARNING! Loss dropped below random baseline!")
+else:
+    print(f"\n❌ train.py architecture NOT learning (loss at random baseline)")
