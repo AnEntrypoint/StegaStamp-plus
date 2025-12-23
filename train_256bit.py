@@ -15,6 +15,8 @@ BATCH_SIZE = 4
 NUM_STEPS = 140000
 LEARNING_RATE = 0.0001
 CRITIC_RATE = 0.0001
+CHECKPOINT_INTERVAL = 10000
+VALIDATION_BATCHES = 10
 
 print("Loading training images...", flush=True)
 img_files = (glob.glob(os.path.join(TRAIN_PATH, '*.jpg')) +
@@ -42,6 +44,31 @@ def get_img_batch(batch_size=BATCH_SIZE):
         batch_secret.append(secret)
 
     return np.array(batch_cover), np.array(batch_secret)
+
+def validate_checkpoint(encoder, decoder, num_batches=VALIDATION_BATCHES):
+    accuracies = []
+    secret_losses = []
+
+    for _ in range(num_batches):
+        images, secrets = get_img_batch(BATCH_SIZE)
+        images = tf.constant(images)
+        secrets = tf.constant(secrets)
+
+        residual = encoder([secrets, images], training=False)
+        encoded = images + residual
+        decoded = decoder(encoded, training=False)
+
+        secret_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
+        probs = tf.nn.sigmoid(decoded).numpy()
+        predicted = (probs > 0.5).astype(int)
+        accuracy = np.mean(predicted == secrets.numpy())
+
+        accuracies.append(accuracy)
+        secret_losses.append(float(secret_loss))
+
+    mean_acc = np.mean(accuracies)
+    mean_loss = np.mean(secret_losses)
+    return mean_acc, mean_loss
 
 class SpatialTransformer(keras.layers.Layer):
     def __init__(self):
@@ -212,9 +239,11 @@ def get_loss_scales(step, total_steps):
 print(f"Training 256-bit secrets for {NUM_STEPS} steps...", flush=True)
 print(f"Phase 1 (secret-only): steps 0-14000 | Phase 2 (ramp): 14001-56000 | Phase 3 (full): 56001-140000", flush=True)
 print("Features: Multi-loss (secret + L2 + LPIPS), Adversarial critic, geometric invariance", flush=True)
+print("Validation: Accuracy tested at every checkpoint. Training aborts if model not learning.", flush=True)
 
 phase1_end = int(NUM_STEPS * 0.1)
 phase2_end = int(NUM_STEPS * 0.4)
+prev_loss = None
 
 for step in range(NUM_STEPS):
     images, secrets = get_img_batch(BATCH_SIZE)
@@ -239,14 +268,29 @@ for step in range(NUM_STEPS):
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
         print(f"[INIT Step {step}] Residual:{res_mean:.8f} L2:{float(l2_loss):.8f} Critic:{float(crit_loss):.8f}", flush=True)
 
-    if (step + 1) % 10000 == 0:
+    if (step + 1) % CHECKPOINT_INTERVAL == 0:
+        print(f"\n[CHECKPOINT] Validating step {step+1}...", flush=True)
+        val_acc, val_loss = validate_checkpoint(encoder, decoder)
+        print(f"[CHECKPOINT] Validation accuracy: {val_acc:.4f} | Validation loss: {val_loss:.4f}", flush=True)
+
+        if val_acc <= 0.5:
+            print(f"✗ ABORT: Model not learning! Accuracy at {val_acc:.4f} (random baseline: 0.5)", flush=True)
+            print(f"Training failed at step {step+1}. Model did not converge.", flush=True)
+            exit(1)
+
+        if prev_loss is not None and val_loss >= prev_loss * 0.95:
+            print(f"⚠ WARNING: Loss not improving. Prev: {prev_loss:.4f}, Current: {val_loss:.4f}", flush=True)
+
         encoder.save(f'encoder_256bit_step_{step+1}.keras')
         decoder.save(f'decoder_256bit_step_{step+1}.keras')
         critic.save(f'critic_256bit_step_{step+1}.keras')
         checkpoint_mb = os.path.getsize(f'encoder_256bit_step_{step+1}.keras') / (1024*1024)
-        print(f"✓ CHECKPOINT saved: step {step+1} ({checkpoint_mb:.0f}MB) | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f}", flush=True)
+        print(f"✓ CHECKPOINT SAVED: step {step+1} ({checkpoint_mb:.0f}MB) | Accuracy: {val_acc:.4f} | Loss: {val_loss:.4f}", flush=True)
+        prev_loss = val_loss
+        print()
 
 encoder.save('encoder_256bit_final.keras')
 decoder.save('decoder_256bit_final.keras')
 critic.save('critic_256bit_final.keras')
-print("✓ Training complete with all paper features!", flush=True)
+print("\n✓ Training complete with all paper features!", flush=True)
+print("✓ All checkpoints validated and passed accuracy threshold.", flush=True)
