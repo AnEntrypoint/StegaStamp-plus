@@ -10,11 +10,15 @@
 
 **Architecture Design** (based on original paper): Encoder implements U-Net taking 256-bit secret input through 7500 dimension dense representation expanding to 50 by 50 by 3 spatial tensor, upsampled to 400 by 400, with 5 downsampling layers and 4 upsampling layers with skip connections. Decoder implements 5-layer convolutional network extracting secrets from potentially attacked images. Critic network evaluates authenticity of encoded images. Multi-loss combines secret loss weighted 1.5 plus L2 reconstruction loss scheduled 0 to 2.0 over 14000 steps, plus LPIPS at 0.1 weight, plus critic loss at 0.1 weight. Adam optimizer learning rate 0.0001 for encoder/decoder, 0.0001 for critic. Batch size 4. Data uses 400 by 400 RGB images normalized to negative 0.5 to positive 0.5 range.
 
-**Execution**: Complete training pipeline with built-in validation.
+**Execution**: Complete training pipeline with built-in validation and directionality tracking.
 - ./train.sh: Run full training with automatic checkpoint validation and learning detection
+- Directionality indicators: ↓ improving, → plateau, ↑ degrading shown at each step
+- Loss window tracking (10-step rolling average) for trend detection
 - Training automatically aborts if model accuracy stays at random baseline (50%)
+- Training aborts if loss plateaus for 5000+ consecutive steps (no improvement)
 - Validates accuracy at every 10000 step checkpoint
 - Only saves checkpoints when model demonstrates learning
+- Tracks average accuracy across recent checkpoints
 
 **Inference and Testing**:
 - python3 infer_256bit.py <step> <image>: Extract 256-bit secret from image using decoder at checkpoint
