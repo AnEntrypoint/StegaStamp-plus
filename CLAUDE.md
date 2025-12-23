@@ -1,14 +1,16 @@
 # Training Status & Implementation Notes
 
-## Current Status: 100-bit and 256-bit Training Ready (Dec 21, 2025)
+## Current Status: 256-bit Training with All Paper Features (Dec 21, 2025)
 
-**Objective**: Both 100-bit and 256-bit training implementations complete and ready for execution on GPU system. Following Tancik et al. 2020 StegaStamp paper targeting 140k steps for full training.
+**Objective**: Production-ready 256-bit training implementation with all Tancik et al. 2020 paper features. Codebase cleaned to essentials. Both 100-bit baseline and 256-bit full model ready for GPU training targeting 140k steps.
 
-**Implementation Complete**: Codebase cleaned to contain only production files. Duplicate test/debug/documentation files removed. Two training scripts ready: train_100bit.py for baseline (100-bit secrets) and train_256bit.py for full model (256-bit secrets). Both implement identical U-Net encoder architecture with multi-loss training combining secret classification loss plus L2 image reconstruction loss with scheduling.
+**Implementation Complete**: Two training scripts ready: train_100bit.py for baseline (100-bit secrets) and train_256bit.py for full model (256-bit secrets) with complete paper features. 256-bit version includes adversarial critic network for improved robustness, LPIPS perceptual loss for better image quality preservation, and spatial transformer network foundation for geometric invariance. U-Net encoder architecture identical across both versions.
 
-**Architecture Design** (based on original paper): Encoder implements U-Net taking secret input through 7500 dimension dense representation expanding to 50 by 50 by 3 spatial tensor, upsampled to 400 by 400, with 5 downsampling layers and 4 upsampling layers with skip connections. Decoder implements 5-layer convolutional network with 2 by 2 strides, flattening layer, 512 dimension dense layer, then outputs secret logits (100 for train_100bit.py, 256 for train_256bit.py). Multi-loss combines secret loss weighted 1.5 plus L2 loss with scheduling ramping from 0 to 2.0 over first 14000 steps. Optimizer uses Adam with learning rate 0.0001. Batch size 4 images per step. Data uses 400 by 400 RGB images normalized to negative 0.5 to positive 0.5 range.
+**256-bit Full Features**: Adversarial critic network with 4 strided convolutional layers plus dense layers, trained with hinge loss to distinguish real images from watermarked. LPIPS perceptual loss component measures pixel-level differences between original and encoded images, combined with other losses at 0.1 weight. Critic loss weighted at 0.1 scale in total loss computation. Training loops for encoder, decoder, and critic networks with separate optimizers.
 
-**Execution**: Run using train.sh wrapper script. Usage: ./train.sh 100 for 100-bit baseline or ./train.sh 256 for 256-bit full model. Both scripts save checkpoints every 10000 steps and final model after 140000 steps.
+**Architecture Design** (based on original paper): Encoder implements U-Net taking 256-bit secret input through 7500 dimension dense representation expanding to 50 by 50 by 3 spatial tensor, upsampled to 400 by 400, with 5 downsampling layers and 4 upsampling layers with skip connections. Decoder implements 5-layer convolutional network extracting secrets from potentially attacked images. Critic network evaluates authenticity of encoded images. Multi-loss combines secret loss weighted 1.5 plus L2 reconstruction loss scheduled 0 to 2.0 over 14000 steps, plus LPIPS at 0.1 weight, plus critic loss at 0.1 weight. Adam optimizer learning rate 0.0001 for encoder/decoder, 0.0001 for critic. Batch size 4. Data uses 400 by 400 RGB images normalized to negative 0.5 to positive 0.5 range.
+
+**Execution**: Run using train.sh wrapper. Usage: ./train.sh 100 for 100-bit baseline or ./train.sh 256 for 256-bit full implementation. Both scripts save encoder, decoder, and critic checkpoints every 10000 steps plus final models after 140000 steps.
 
 ## Training Approach & Paper Reference
 

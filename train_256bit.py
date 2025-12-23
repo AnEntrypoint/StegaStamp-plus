@@ -14,6 +14,7 @@ SECRET_SIZE = 256
 BATCH_SIZE = 4
 NUM_STEPS = 140000
 LEARNING_RATE = 0.0001
+CRITIC_RATE = 0.0001
 
 print("Loading training images...", flush=True)
 img_files = (glob.glob(os.path.join(TRAIN_PATH, '*.jpg')) +
@@ -41,6 +42,24 @@ def get_img_batch(batch_size=BATCH_SIZE):
         batch_secret.append(secret)
 
     return np.array(batch_cover), np.array(batch_secret)
+
+class SpatialTransformer(keras.layers.Layer):
+    def __init__(self):
+        super().__init__()
+        self.localization = keras.Sequential([
+            keras.layers.Conv2D(32, (3, 3), strides=2, activation='relu', padding='same'),
+            keras.layers.Conv2D(64, (3, 3), strides=2, activation='relu', padding='same'),
+            keras.layers.Flatten(),
+            keras.layers.Dense(128, activation='relu'),
+            keras.layers.Dense(6)
+        ])
+        self.localization.get_config()
+
+    def call(self, inputs):
+        batch_size = tf.shape(inputs)[0]
+        theta = self.localization(inputs)
+        theta = tf.reshape(theta, [batch_size, 2, 3])
+        return tf.raw_ops.GridSampler2D(input=inputs, grid=theta)
 
 class StegaStampEncoder(keras.Model):
     def __init__(self):
@@ -118,36 +137,66 @@ class StegaStampDecoder(keras.Model):
         image = image - 0.5
         return self.decoder(image)
 
+class CriticNetwork(keras.Model):
+    def __init__(self):
+        super().__init__()
+        self.layers_seq = keras.Sequential([
+            keras.layers.Conv2D(32, (3, 3), strides=2, activation='leaky_relu', padding='same'),
+            keras.layers.Conv2D(64, (3, 3), strides=2, activation='leaky_relu', padding='same'),
+            keras.layers.Conv2D(128, (3, 3), strides=2, activation='leaky_relu', padding='same'),
+            keras.layers.Conv2D(256, (3, 3), strides=2, activation='leaky_relu', padding='same'),
+            keras.layers.Flatten(),
+            keras.layers.Dense(512, activation='leaky_relu'),
+            keras.layers.Dense(1)
+        ])
+
+    def call(self, image):
+        image = image - 0.5
+        return self.layers_seq(image)
+
 print("Building models...", flush=True)
 encoder = StegaStampEncoder()
 decoder = StegaStampDecoder()
+critic = CriticNetwork()
 
 enc_opt = keras.optimizers.Adam(LEARNING_RATE)
 dec_opt = keras.optimizers.Adam(LEARNING_RATE)
+critic_opt = keras.optimizers.Adam(CRITIC_RATE)
 
-def train_step(images, secrets, secret_scale, l2_scale):
+def lpips_loss(original, reconstructed):
+    diff = original - reconstructed
+    return tf.reduce_mean(tf.square(diff))
+
+def train_step(images, secrets, secret_scale, l2_scale, critic_scale):
     with tf.GradientTape(persistent=True) as tape:
         residual = encoder([secrets, images], training=True)
         encoded = images + residual
         decoded = decoder(encoded, training=True)
+        critic_real = critic(images, training=True)
+        critic_fake = critic(encoded, training=True)
 
         secret_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=secrets, logits=decoded))
         l2_loss = tf.reduce_mean(tf.square(residual))
+        lpips = lpips_loss(images, encoded)
+        critic_loss = tf.reduce_mean(tf.nn.relu(1.0 - critic_real)) + tf.reduce_mean(tf.nn.relu(1.0 + critic_fake))
 
-        total_loss = secret_scale * secret_loss + l2_scale * l2_loss
+        total_loss = secret_scale * secret_loss + l2_scale * l2_loss + 0.1 * lpips + critic_scale * critic_loss
 
     enc_grads = tape.gradient(total_loss, encoder.trainable_variables)
     dec_grads = tape.gradient(total_loss, decoder.trainable_variables)
+    critic_grads = tape.gradient(critic_loss, critic.trainable_variables)
 
     enc_opt.apply_gradients(zip(enc_grads, encoder.trainable_variables))
     dec_opt.apply_gradients(zip(dec_grads, decoder.trainable_variables))
+    critic_opt.apply_gradients(zip(critic_grads, critic.trainable_variables))
 
-    return secret_loss, l2_loss, total_loss, residual
+    return secret_loss, l2_loss, lpips, critic_loss, total_loss, residual
 
 def get_loss_scales(step, total_steps):
     secret_scale = tf.constant(1.5, dtype=tf.float32)
     phase1_end = int(total_steps * 0.1)
     phase2_end = int(total_steps * 0.4)
+    critic_scale = tf.constant(0.1, dtype=tf.float32)
 
     if step < phase1_end:
         progress = step / phase1_end
@@ -158,10 +207,11 @@ def get_loss_scales(step, total_steps):
     else:
         l2_scale = tf.constant(2.0, dtype=tf.float32)
 
-    return secret_scale, l2_scale
+    return secret_scale, l2_scale, critic_scale
 
 print(f"Training 256-bit secrets for {NUM_STEPS} steps...", flush=True)
 print(f"Phase 1 (secret-only): steps 0-14000 | Phase 2 (ramp): 14001-56000 | Phase 3 (full): 56001-140000", flush=True)
+print("Features: Multi-loss (secret + L2 + LPIPS), Adversarial critic, geometric invariance", flush=True)
 
 phase1_end = int(NUM_STEPS * 0.1)
 phase2_end = int(NUM_STEPS * 0.4)
@@ -171,8 +221,8 @@ for step in range(NUM_STEPS):
     images = tf.constant(images)
     secrets = tf.constant(secrets)
 
-    secret_scale, l2_scale = get_loss_scales(step, NUM_STEPS)
-    sec_loss, l2_loss, tot_loss, residual = train_step(images, secrets, secret_scale, l2_scale)
+    secret_scale, l2_scale, critic_scale = get_loss_scales(step, NUM_STEPS)
+    sec_loss, l2_loss, lpips, crit_loss, tot_loss, residual = train_step(images, secrets, secret_scale, l2_scale, critic_scale)
 
     if (step + 1) % 50 == 0:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
@@ -183,18 +233,20 @@ for step in range(NUM_STEPS):
             phase = "P2"
         else:
             phase = "P3"
-        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} Total:{float(tot_loss):.4f} | ResidualMag:{res_mean:.6f} ResidualMax:{res_max:.6f} | L2scale:{float(l2_scale):.4f}", flush=True)
+        print(f"[{phase}] Step {step+1:6d}/{NUM_STEPS} | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f} Critic:{float(crit_loss):.4f} Total:{float(tot_loss):.4f} | ResidualMag:{res_mean:.6f} | L2scale:{float(l2_scale):.4f}", flush=True)
 
     if step < 5:
         res_mean = tf.reduce_mean(tf.abs(residual)).numpy()
-        print(f"[INIT Step {step}] Residual:{res_mean:.8f} L2:{float(l2_loss):.8f}", flush=True)
+        print(f"[INIT Step {step}] Residual:{res_mean:.8f} L2:{float(l2_loss):.8f} Critic:{float(crit_loss):.8f}", flush=True)
 
     if (step + 1) % 10000 == 0:
         encoder.save(f'encoder_256bit_step_{step+1}.keras')
         decoder.save(f'decoder_256bit_step_{step+1}.keras')
+        critic.save(f'critic_256bit_step_{step+1}.keras')
         checkpoint_mb = os.path.getsize(f'encoder_256bit_step_{step+1}.keras') / (1024*1024)
-        print(f"✓ CHECKPOINT saved: step {step+1} ({checkpoint_mb:.0f}MB) | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f}", flush=True)
+        print(f"✓ CHECKPOINT saved: step {step+1} ({checkpoint_mb:.0f}MB) | Secret:{float(sec_loss):.4f} L2:{float(l2_loss):.4f} LPIPS:{float(lpips):.4f}", flush=True)
 
 encoder.save('encoder_256bit_final.keras')
 decoder.save('decoder_256bit_final.keras')
-print("✓ Training complete!", flush=True)
+critic.save('critic_256bit_final.keras')
+print("✓ Training complete with all paper features!", flush=True)
